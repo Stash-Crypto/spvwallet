@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-func createTxStore() (*TxStore, error) {
+func createTxStore() (*txStore, error) {
 	mockDb := MockDatastore{
 		&mockKeyStore{make(map[string]*keyStoreEntry)},
 		&mockUtxoStore{make(map[string]*wallet.Utxo)},
@@ -26,7 +26,7 @@ func createTxStore() (*TxStore, error) {
 	rand.Read(seed)
 	key, _ := hdkeychain.NewMaster(seed, &chaincfg.TestNet3Params)
 	km, _ := NewKeyManager(mockDb.Keys(), &chaincfg.TestNet3Params, key)
-	return NewTxStore(&chaincfg.TestNet3Params, &mockDb, km)
+	return newTxStore(&chaincfg.TestNet3Params, &mockDb, km)
 }
 
 func TestNewTxStore(t *testing.T) {
@@ -44,7 +44,7 @@ func TestTxStore_PopulateAdrs(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	err = txStore.PopulateAdrs()
+	err = txStore.populateAdrs()
 	if err != nil {
 		t.Error(err)
 	}
@@ -59,7 +59,7 @@ func TestTxStore_PopulateAdrs(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	err = txStore.PopulateAdrs()
+	err = txStore.populateAdrs()
 	if err != nil {
 		t.Error(err)
 	}
@@ -73,7 +73,7 @@ func TestTxStore_PopulateAdrs(t *testing.T) {
 	tx.BtcDecode(r, 1, wire.WitnessEncoding)
 
 	err = txStore.Txns().Put(tx, 100000, 0, time.Now(), false)
-	err = txStore.PopulateAdrs()
+	err = txStore.populateAdrs()
 	if err != nil {
 		t.Error(err)
 	}
@@ -106,7 +106,7 @@ func TestTxStore_GimmeFilter(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	err = txStore.PopulateAdrs()
+	err = txStore.populateAdrs()
 	if err != nil {
 		t.Error(err)
 	}
@@ -245,7 +245,7 @@ func TestTxStore_markAsDead(t *testing.T) {
 		t.Error(err)
 	}
 
-	err = txStore.markAsDead(tx1.TxHash())
+	err = txStore.MarkAsDead(tx1.TxHash())
 	if err != nil {
 		t.Error(err)
 	}
@@ -288,7 +288,7 @@ func TestTxStore_markAsDead(t *testing.T) {
 	}
 	err = txStore.Stxos().Put(st)
 
-	err = txStore.markAsDead(tx2.TxHash())
+	err = txStore.MarkAsDead(tx2.TxHash())
 	if err != nil {
 		t.Error(err)
 	}
@@ -334,7 +334,7 @@ func TestTxStore_markAsDead(t *testing.T) {
 	}
 	err = txStore.Stxos().Put(st)
 
-	err = txStore.markAsDead(tx1.TxHash())
+	err = txStore.MarkAsDead(tx1.TxHash())
 	if err != nil {
 		t.Error(err)
 	}
@@ -410,7 +410,7 @@ func TestTxStore_markAsDead(t *testing.T) {
 	}
 	err = txStore.Stxos().Put(st)
 
-	err = txStore.markAsDead(tx1.TxHash())
+	err = txStore.MarkAsDead(tx1.TxHash())
 	if err != nil {
 		t.Error(err)
 	}
@@ -510,7 +510,7 @@ func TestTxStore_processReorg(t *testing.T) {
 	}
 	err = txStore.Stxos().Put(st)
 
-	err = txStore.processReorg(400000)
+	err = ProcessReorg(txStore, 400000)
 	if err != nil {
 		t.Error(err)
 	}
@@ -664,7 +664,7 @@ func TestTxStore_Ingest(t *testing.T) {
 		t.Error(err)
 	}
 	txStore.WatchedScripts().Put(script)
-	txStore.PopulateAdrs()
+	txStore.populateAdrs()
 	tx3.AddTxOut(wire.NewTxOut(400000, script))
 
 	_, err = txStore.Ingest(tx3, 0)

@@ -57,10 +57,16 @@ type Config struct {
 	// A logger. You can write the logs to file or stdout or however else you want.
 	Logger logging.Backend
 
-	// The maximum number of new matches a filter is allowed to have before
-	// we send an update.
+	// MaxFilterNewMatches is the number of new matches (including false
+	// positives) our filter can have before we make a new one.
 	MaxFilterNewMatches uint32
 }
+
+const (
+	// DefaultMaxFilterNewMatches is the default number of new matches
+	// before we remake the filter.
+	DefaultMaxFilterNewMatches = 7
+)
 
 func NewDefaultConfig() *Config {
 	repoPath, _ := getRepoPath()

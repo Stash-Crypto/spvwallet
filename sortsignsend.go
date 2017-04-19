@@ -22,10 +22,9 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 )
 
-func (s *SPVManager) Broadcast(tx *wire.MsgTx) error {
-
+func (mgr *SPVManager) Broadcast(tx *wire.MsgTx) error {
 	// Our own tx; don't keep track of false positives
-	_, err := s.TxStore.Ingest(tx, 0)
+	_, err := mgr.TxStore.Ingest(tx, 0)
 	if err != nil {
 		return err
 	}
@@ -40,9 +39,9 @@ func (s *SPVManager) Broadcast(tx *wire.MsgTx) error {
 	}
 
 	log.Debugf("Broadcasting tx %s to peers", tx.TxHash().String())
-	for _, peer := range s.PeerManager.ReadyPeers() {
+	for _, peer := range mgr.PeerManager.ReadyPeers() {
 		peer.QueueMessage(invMsg, nil)
-		s.updateFilterAndSend(peer)
+		updateFilterAndSend(peer, mgr.TxStore)
 	}
 	return nil
 }
@@ -76,7 +75,7 @@ func NewCoin(txid []byte, index uint32, value btc.Amount, numConfs int64, script
 
 func (w *SPVWallet) gatherCoins() map[coinset.Coin]*hd.ExtendedKey {
 	height, _ := w.mgr.Blockchain.db.Height()
-	utxos, _ := w.mgr.TxStore.Utxos().GetAll()
+	utxos, _ := w.txStore.Utxos().GetAll()
 	m := make(map[coinset.Coin]*hd.ExtendedKey)
 	for _, u := range utxos {
 		if u.WatchOnly {
@@ -119,7 +118,7 @@ var BumpFeeTransactionDeadError = errors.New("Cannot bump fee of dead transactio
 var BumpFeeNotFoundError = errors.New("Transaction either doesn't exist or has already been spent")
 
 func (w *SPVWallet) BumpFee(txid chainhash.Hash) (*chainhash.Hash, error) {
-	_, txn, err := w.mgr.TxStore.Txns().Get(txid)
+	_, txn, err := w.txStore.Txns().Get(txid)
 	if err != nil {
 		return nil, err
 	}
@@ -182,7 +181,7 @@ func (w *SPVWallet) BumpFee(txid chainhash.Hash) (*chainhash.Hash, error) {
 		}
 	}*/
 	// Check utxos for CPFP
-	utxos, _ := w.mgr.TxStore.Utxos().GetAll()
+	utxos, _ := w.txStore.Utxos().GetAll()
 	for _, u := range utxos {
 		if u.Op.Hash.IsEqual(&txid) && u.AtHeight == 0 {
 			addr, err := w.ScriptToAddress(u.ScriptPubkey)

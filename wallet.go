@@ -3,8 +3,6 @@ package spvwallet
 import (
 	"errors"
 	"io"
-	"os"
-	"path"
 	"sync"
 	"time"
 
@@ -34,6 +32,7 @@ type SPVWallet struct {
 	repoPath string
 
 	keyManager *KeyManager
+	txStore    *txStore
 
 	fPositives    chan *peer.Peer
 	stopChan      chan int
@@ -44,7 +43,7 @@ type SPVWallet struct {
 
 	running bool
 
-	config *PeerManagerConfig
+	//config *PeerManagerConfig
 
 	requests blockRequests
 
@@ -114,10 +113,11 @@ func NewSPVWallet(config *Config) (*SPVWallet, error) {
 		return nil, err
 	}
 
-	txStore, err := NewTxStore(w.params, config.DB, w.keyManager)
+	w.txStore, err = newTxStore(w.params, config.DB, w.keyManager)
 	if err != nil {
 		return nil, err
 	}
+	w.mgr.TxStore = w.txStore
 
 	hdb, err := NewHeaderDB(w.repoPath)
 	if err != nil {
@@ -128,48 +128,18 @@ func NewSPVWallet(config *Config) (*SPVWallet, error) {
 		return nil, err
 	}
 
-	peerManager, err := NewPeerManager(w.config)
+	pmConfig := &PeerManagerConfig{
+		UserAgentName:    config.UserAgent,
+		UserAgentVersion: WALLET_VERSION,
+		Params:           w.params,
+		AddressCacheDir:  config.RepoPath,
+		Proxy:            config.Proxy,
+		TrustedPeer:      config.TrustedPeer,
+	}
+
+	w.mgr, err = NewSPVManager(w.txStore, blockchain, pmConfig, config)
 	if err != nil {
 		return nil, err
-	}
-
-	w.mgr = NewSPVManager(txStore, blockchain, peerManager, config)
-
-	listeners := &peer.MessageListeners{
-		OnMerkleBlock: w.mgr.onMerkleBlock,
-		OnInv:         w.mgr.onInv,
-		OnTx:          w.mgr.onTx,
-		OnGetData:     w.mgr.onGetData,
-		OnReject:      w.mgr.onReject,
-	}
-
-	getNewestBlock := func() (*chainhash.Hash, int32, error) {
-		storedHeader, err := w.mgr.Blockchain.db.GetBestHeader()
-		if err != nil {
-			return nil, 0, err
-		}
-		height, err := w.mgr.Blockchain.db.Height()
-		if err != nil {
-			return nil, 0, err
-		}
-		hash := storedHeader.Header.BlockHash()
-		return &hash, int32(height), nil
-	}
-
-	w.config = &PeerManagerConfig{
-		UserAgentName:      config.UserAgent,
-		UserAgentVersion:   WALLET_VERSION,
-		Params:             w.params,
-		AddressCacheDir:    config.RepoPath,
-		GetFilter:          w.mgr.TxStore.GimmeFilter,
-		StartChainDownload: w.mgr.startChainDownload,
-		GetNewestBlock:     getNewestBlock,
-		Listeners:          listeners,
-		Proxy:              config.Proxy,
-	}
-
-	if config.TrustedPeer != nil {
-		w.config.TrustedPeer = config.TrustedPeer
 	}
 
 	return w, nil
@@ -220,11 +190,12 @@ func (w *SPVWallet) CurrentAddress(purpose wallet.KeyPurpose) btc.Address {
 }
 
 func (w *SPVWallet) NewAddress(purpose wallet.KeyPurpose) btc.Address {
-	i, _ := w.mgr.TxStore.Keys().GetUnused(purpose)
+	i, _ := w.txStore.Keys().GetUnused(purpose)
 	key, _ := w.keyManager.generateChildKey(purpose, uint32(i[1]))
 	addr, _ := key.Address(w.params)
-	w.mgr.TxStore.Keys().MarkKeyAsUsed(addr.ScriptAddress())
-	w.mgr.TxStore.PopulateAdrs()
+	script, _ := txscript.PayToAddrScript(btc.Address(addr))
+	w.txStore.Keys().MarkKeyAsUsed(script)
+	w.txStore.populateAdrs()
 	return btc.Address(addr)
 }
 
@@ -290,8 +261,8 @@ func (w *SPVWallet) ListKeys() []btcec.PrivateKey {
 }
 
 func (w *SPVWallet) Balance() (confirmed, unconfirmed int64) {
-	utxos, _ := w.mgr.TxStore.Utxos().GetAll()
-	stxos, _ := w.mgr.TxStore.Stxos().GetAll()
+	utxos, _ := w.txStore.Utxos().GetAll()
+	stxos, _ := w.txStore.Stxos().GetAll()
 	for _, utxo := range utxos {
 		if !utxo.WatchOnly {
 			if utxo.AtHeight > 0 {
@@ -309,16 +280,16 @@ func (w *SPVWallet) Balance() (confirmed, unconfirmed int64) {
 }
 
 func (w *SPVWallet) Transactions() ([]wallet.Txn, error) {
-	return w.mgr.TxStore.Txns().GetAll(false)
+	return w.txStore.Txns().GetAll(false)
 }
 
 func (w *SPVWallet) GetTransaction(txid chainhash.Hash) (wallet.Txn, error) {
-	_, txn, err := w.mgr.TxStore.Txns().Get(txid)
+	_, txn, err := w.txStore.Txns().Get(txid)
 	return txn, err
 }
 
 func (w *SPVWallet) GetConfirmations(txid chainhash.Hash) (uint32, uint32, error) {
-	_, txn, err := w.mgr.TxStore.Txns().Get(txid)
+	_, txn, err := w.txStore.Txns().Get(txid)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -355,7 +326,7 @@ func (w *SPVWallet) Params() *chaincfg.Params {
 }
 
 func (w *SPVWallet) AddTransactionListener(callback func(wallet.TransactionCallback)) {
-	w.mgr.TxStore.listeners = append(w.mgr.TxStore.listeners, callback)
+	w.txStore.listeners = append(w.txStore.listeners, callback)
 }
 
 func (w *SPVWallet) ChainTip() (uint32, chainhash.Hash) {
@@ -368,11 +339,11 @@ func (w *SPVWallet) ChainTip() (uint32, chainhash.Hash) {
 }
 
 func (w *SPVWallet) AddWatchedScript(script []byte) error {
-	err := w.mgr.TxStore.WatchedScripts().Put(script)
-	w.mgr.TxStore.PopulateAdrs()
+	err := w.txStore.WatchedScripts().Put(script)
+	w.txStore.populateAdrs()
 
 	for _, peer := range w.mgr.PeerManager.ReadyPeers() {
-		w.mgr.updateFilterAndSend(peer)
+		updateFilterAndSend(peer, w.txStore)
 	}
 	return err
 }
@@ -385,7 +356,7 @@ func (w *SPVWallet) Close() {
 	w.mgr.Close()
 }
 
-func (w *SPVWallet) ReSyncBlockchain(fromDate time.Time) {
+/*func (w *SPVWallet) ReSyncBlockchain(fromDate time.Time) {
 	w.Close()
 	os.Remove(path.Join(w.repoPath, "headers.bin"))
 	hdb, err := NewHeaderDB(w.repoPath)
@@ -404,4 +375,4 @@ func (w *SPVWallet) ReSyncBlockchain(fromDate time.Time) {
 	}
 	w.mgr.requests.reset()
 	go w.Start()
-}
+}*/

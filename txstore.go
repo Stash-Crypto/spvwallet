@@ -3,6 +3,9 @@ package spvwallet
 import (
 	"bytes"
 	"errors"
+	"sync"
+	"time"
+
 	"github.com/OpenBazaar/wallet-interface"
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg"
@@ -11,11 +14,33 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/bloom"
-	"sync"
-	"time"
 )
 
-type TxStore struct {
+const FlagPrefix = 0x00
+
+type TxStore interface {
+	// Ingest puts a tx into the DB atomically.  This can result in a
+	// gain, a loss, or no result.  Gain or loss in satoshis is returned.
+	Ingest(tx *wire.MsgTx, height int32) (uint32, error)
+
+	// GetPendingInv returns an inv message containing all txs known to the
+	// db which are at height 0 (not known to be confirmed).
+	// This can be useful on startup or to rebroadcast unconfirmed txs.
+	GetPendingInv() (*wire.MsgInv, error)
+
+	// ... or I'm gonna fade away
+	GimmeFilter() (*bloom.Filter, error)
+
+	MarkAsDead(txid chainhash.Hash) error
+
+	// Fetch a raw tx and it's metadata given a hash
+	GetTx(txid chainhash.Hash) (*wire.MsgTx, wallet.Txn, error)
+
+	// Fetch all transactions from the db
+	GetAllTxs(includeWatchOnly bool) ([]wallet.Txn, error)
+}
+
+type txStore struct {
 	adrs           []btcutil.Address
 	watchedScripts [][]byte
 	txids          map[string]int32
@@ -31,8 +56,8 @@ type TxStore struct {
 	wallet.Datastore
 }
 
-func NewTxStore(p *chaincfg.Params, db wallet.Datastore, keyManager *KeyManager) (*TxStore, error) {
-	txs := &TxStore{
+func newTxStore(p *chaincfg.Params, db wallet.Datastore, keyManager *KeyManager) (*txStore, error) {
+	txs := &txStore{
 		params:     p,
 		keyManager: keyManager,
 		addrMutex:  new(sync.Mutex),
@@ -40,16 +65,63 @@ func NewTxStore(p *chaincfg.Params, db wallet.Datastore, keyManager *KeyManager)
 		txids:      make(map[string]int32),
 		Datastore:  db,
 	}
-	err := txs.PopulateAdrs()
+	err := txs.populateAdrs()
 	if err != nil {
 		return nil, err
 	}
 	return txs, nil
 }
 
+func (ts *txStore) Utxos() wallet.Utxos {
+	return ts.Utxos()
+}
+
+func (ts *txStore) Stxos() wallet.Stxos {
+	return ts.Stxos()
+}
+
+func (ts *txStore) Txns() wallet.Txns {
+	return ts.Txns()
+}
+
+func (ts *txStore) Keys() wallet.Keys {
+	return ts.Keys()
+}
+
+func (ts *txStore) WatchedScripts() wallet.WatchedScripts {
+	return ts.WatchedScripts()
+}
+
+// Fetch a raw tx and it's metadata given a hash
+func (ts *txStore) GetTx(txid chainhash.Hash) (*wire.MsgTx, wallet.Txn, error) {
+	return ts.Txns().Get(txid)
+}
+
+// Fetch all transactions from the db
+func (ts *txStore) GetAllTxs(includeWatchOnly bool) ([]wallet.Txn, error) {
+	return ts.Txns().GetAll(includeWatchOnly)
+}
+
+func (ts *txStore) Addresses() []btcutil.Address {
+	ts.addrMutex.Lock()
+	defer ts.addrMutex.Unlock()
+
+	adrs := make([]btcutil.Address, len(ts.adrs))
+
+	for i, adr := range ts.adrs {
+		adrs[i] = adr
+	}
+
+	return adrs
+}
+
+func (ts *txStore) Params() *chaincfg.Params {
+	return ts.params
+}
+
 // ... or I'm gonna fade away
-func (ts *TxStore) GimmeFilter() (*bloom.Filter, error) {
-	ts.PopulateAdrs()
+func (ts *txStore) GimmeFilter() (*bloom.Filter, error) {
+	adrs := ts.Addresses()
 
 	// get all utxos to add outpoints to filter
 	allUtxos, err := ts.Utxos().GetAll()
@@ -61,16 +133,14 @@ func (ts *TxStore) GimmeFilter() (*bloom.Filter, error) {
 	if err != nil {
 		return nil, err
 	}
-	ts.addrMutex.Lock()
 	elem := uint32(len(ts.adrs)+len(allUtxos)+len(allStxos)) + uint32(len(ts.watchedScripts))
 	f := bloom.NewFilter(elem, 0, 0.00003, wire.BloomUpdateAll)
 
 	// note there could be false positives since we're just looking
 	// for the 20 byte PKH without the opcodes.
-	for _, a := range ts.adrs { // add 20-byte pubkeyhash
+	for _, a := range adrs { // add 20-byte pubkeyhash
 		f.Add(a.ScriptAddress())
 	}
-	ts.addrMutex.Unlock()
 	for _, u := range allUtxos {
 		f.AddOutPoint(&u.Op)
 	}
@@ -78,8 +148,12 @@ func (ts *TxStore) GimmeFilter() (*bloom.Filter, error) {
 	for _, s := range allStxos {
 		f.AddOutPoint(&s.Utxo.Op)
 	}
-	for _, w := range ts.watchedScripts {
-		_, addrs, _, err := txscript.ExtractPkScriptAddrs(w, ts.params)
+	scripts, err := ts.WatchedScripts().GetAll()
+	if err != nil {
+		return nil, err
+	}
+	for _, w := range scripts {
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(w, ts.Params())
 		if err != nil {
 			continue
 		}
@@ -92,7 +166,7 @@ func (ts *TxStore) GimmeFilter() (*bloom.Filter, error) {
 // GetDoubleSpends takes a transaction and compares it with
 // all transactions in the db.  It returns a slice of all txids in the db
 // which are double spent by the received tx.
-func (ts *TxStore) CheckDoubleSpends(argTx *wire.MsgTx) ([]*chainhash.Hash, error) {
+func (ts *txStore) CheckDoubleSpends(argTx *wire.MsgTx) ([]*chainhash.Hash, error) {
 	var dubs []*chainhash.Hash // slice of all double-spent txs
 	argTxid := argTx.TxHash()
 	txs, err := ts.Txns().GetAll(true)
@@ -124,7 +198,7 @@ func (ts *TxStore) CheckDoubleSpends(argTx *wire.MsgTx) ([]*chainhash.Hash, erro
 // GetPendingInv returns an inv message containing all txs known to the
 // db which are at height 0 (not known to be confirmed).
 // This can be useful on startup or to rebroadcast unconfirmed txs.
-func (ts *TxStore) GetPendingInv() (*wire.MsgInv, error) {
+func (ts *txStore) GetPendingInv() (*wire.MsgInv, error) {
 	// use a map (really a set) do avoid dupes
 	txidMap := make(map[chainhash.Hash]struct{})
 
@@ -164,7 +238,7 @@ func (ts *TxStore) GetPendingInv() (*wire.MsgInv, error) {
 }
 
 // PopulateAdrs just puts a bunch of adrs in ram; it doesn't touch the DB
-func (ts *TxStore) PopulateAdrs() error {
+func (ts *txStore) populateAdrs() error {
 	keys := ts.keyManager.GetKeys()
 	ts.addrMutex.Lock()
 	ts.adrs = []btcutil.Address{}
@@ -186,7 +260,7 @@ func (ts *TxStore) PopulateAdrs() error {
 
 // Ingest puts a tx into the DB atomically.  This can result in a
 // gain, a loss, or no result.  Gain or loss in satoshis is returned.
-func (ts *TxStore) Ingest(tx *wire.MsgTx, height int32) (uint32, error) {
+func (ts *txStore) Ingest(tx *wire.MsgTx, height int32) (uint32, error) {
 	var hits uint32
 	var err error
 	// Tx has been OK'd by SPV; check tx sanity
@@ -215,7 +289,7 @@ func (ts *TxStore) Ingest(tx *wire.MsgTx, height int32) (uint32, error) {
 		} else {
 			// Mark any unconfirmed doubles as dead
 			for _, double := range doubleSpends {
-				ts.markAsDead(*double)
+				ts.MarkAsDead(*double)
 			}
 		}
 	}
@@ -359,12 +433,12 @@ func (ts *TxStore) Ingest(tx *wire.MsgTx, height int32) (uint32, error) {
 			}
 		}
 		ts.cbMutex.Unlock()
-		ts.PopulateAdrs()
+		ts.populateAdrs()
 	}
 	return hits, err
 }
 
-func (ts *TxStore) markAsDead(txid chainhash.Hash) error {
+func (ts *txStore) MarkAsDead(txid chainhash.Hash) error {
 	stxos, err := ts.Stxos().GetAll()
 	if err != nil {
 		return err
@@ -395,7 +469,7 @@ func (ts *TxStore) markAsDead(txid chainhash.Hash) error {
 			if err := markStxoAsDead(s); err != nil {
 				return err
 			}
-			if err := ts.markAsDead(s.SpendTxid); err != nil {
+			if err := ts.MarkAsDead(s.SpendTxid); err != nil {
 				return err
 			}
 		}
@@ -417,8 +491,8 @@ func (ts *TxStore) markAsDead(txid chainhash.Hash) error {
 	return nil
 }
 
-func (ts *TxStore) processReorg(lastGoodHeight uint32) error {
-	txns, err := ts.Txns().GetAll(true)
+func ProcessReorg(ts TxStore, lastGoodHeight uint32) error {
+	txns, err := ts.GetAllTxs(true)
 	if err != nil {
 		return err
 	}
@@ -429,7 +503,7 @@ func (ts *TxStore) processReorg(lastGoodHeight uint32) error {
 				log.Error(err)
 				continue
 			}
-			err = ts.markAsDead(*txid)
+			err = ts.MarkAsDead(*txid)
 			if err != nil {
 				log.Error(err)
 				continue
@@ -439,7 +513,7 @@ func (ts *TxStore) processReorg(lastGoodHeight uint32) error {
 	return nil
 }
 
-func (ts *TxStore) extractScriptAddress(script []byte) ([]byte, error) {
+func (ts *txStore) extractScriptAddress(script []byte) ([]byte, error) {
 	_, addrs, _, err := txscript.ExtractPkScriptAddrs(script, ts.params)
 	if err != nil {
 		return nil, err

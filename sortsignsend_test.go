@@ -11,13 +11,13 @@ import (
 	"github.com/btcsuite/btcd/wire"
 )
 
-func MockWallet() *SPVWallet {
-	txstore, _ := createTxStore()
+func MockWallet() (*SPVWallet, *txStore) {
+	txStore, _ := createTxStore()
 
 	peerCfg := &PeerManagerConfig{
 		UserAgentVersion: WALLET_VERSION,
 		Params:           &chaincfg.TestNet3Params,
-		GetFilter:        txstore.GimmeFilter,
+		GetFilter:        txStore.GimmeFilter,
 	}
 
 	hdr, _ := NewHeaderDB("")
@@ -27,17 +27,18 @@ func MockWallet() *SPVWallet {
 	peerManager, _ := NewPeerManager(peerCfg)
 	return &SPVWallet{
 		params:     &chaincfg.TestNet3Params,
-		keyManager: txstore.keyManager,
+		keyManager: txStore.keyManager,
+		txStore:    txStore,
 		mgr: &SPVManager{
-			TxStore:     txstore,
+			TxStore:     txStore,
 			PeerManager: peerManager,
 			Blockchain:  bc,
 		},
-	}
+	}, txStore
 }
 
 func Test_gatherCoins(t *testing.T) {
-	w := MockWallet()
+	wallet, _ := MockWallet()
 	h1, err := chainhash.NewHashFromStr("6f7a58ad92702601fcbaac0e039943a384f5274a205c16bb8bbab54f9ea2fbad")
 	if err != nil {
 		t.Error(err)
@@ -55,7 +56,7 @@ func Test_gatherCoins(t *testing.T) {
 		t.Error(err)
 	}
 	op := wire.NewOutPoint(h1, 0)
-	err = w.mgr.TxStore.Utxos().Put(wallet.Utxo{Op: *op, ScriptPubkey: script1, AtHeight: 5, Value: 10000})
+	err = wallet.txStore.Utxos().Put(wallet.Utxo{Op: *op, ScriptPubkey: script1, AtHeight: 5, Value: 10000})
 	if err != nil {
 		t.Error(err)
 	}

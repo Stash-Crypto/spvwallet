@@ -10,8 +10,6 @@ import (
 	"github.com/btcsuite/btcd/wire"
 )
 
-const DefaultMaxFilterNewMatches = 7
-
 var (
 	maxHash              *chainhash.Hash
 	MAX_UNCONFIRMED_TIME time.Duration = time.Hour * 24 * 7
@@ -32,8 +30,9 @@ type SPVManager struct {
 	stopChan chan int
 
 	Blockchain  *Blockchain
-	TxStore     *TxStore
+	TxStore     TxStore
 	PeerManager *PeerManager
+	config      *PeerManagerConfig
 
 	fPositives    chan *peer.Peer
 	fpAccumulator map[int32]uint32
@@ -48,64 +47,99 @@ type SPVManager struct {
 	maxFilterNewMatches uint32
 }
 
-func NewSPVManager(tx *TxStore, b *Blockchain, pm *PeerManager, config *Config) *SPVManager {
+func NewSPVManager(tx TxStore, b *Blockchain, pmconfig *PeerManagerConfig, config *Config) (*SPVManager, error) {
 	maxFilterNewMatches := config.MaxFilterNewMatches
 	if maxFilterNewMatches == 0 {
 		maxFilterNewMatches = DefaultMaxFilterNewMatches
 	}
-	spv := &SPVManager{
+
+	mgr := &SPVManager{
 		fPositives:          make(chan *peer.Peer),
 		fpAccumulator:       make(map[int32]uint32),
 		blockQueue:          make(chan chainhash.Hash, 32),
 		toDownload:          make(map[chainhash.Hash]int32),
+		stopChan:            make(chan int),
 		mutex:               new(sync.RWMutex),
 		Blockchain:          b,
 		TxStore:             tx,
-		PeerManager:         pm,
 		maxFilterNewMatches: maxFilterNewMatches,
+		config:              pmconfig,
 	}
 
-	spv.requests.reset()
-	return spv
+	mgr.requests.reset()
+
+	pmconfig.StartChainDownload = mgr.startChainDownload
+	pmconfig.GetNewestBlock = func() (*chainhash.Hash, int32, error) {
+		storedHeader, err := mgr.Blockchain.db.GetBestHeader()
+		if err != nil {
+			return nil, 0, err
+		}
+		height, err := mgr.Blockchain.db.Height()
+		if err != nil {
+			return nil, 0, err
+		}
+		hash := storedHeader.Header.BlockHash()
+		return &hash, int32(height), nil
+	}
+
+	pmconfig.Listeners = &peer.MessageListeners{
+		OnMerkleBlock: mgr.OnMerkleBlock,
+		OnInv:         mgr.OnInv,
+		OnTx:          mgr.OnTx,
+		OnGetData:     mgr.OnGetData,
+	}
+
+	var err error
+	mgr.PeerManager, err = NewPeerManager(mgr.config)
+	if err != nil {
+		return nil, err
+	}
+
+	return mgr, nil
 }
 
-func (w *SPVManager) Start() {
-	w.running = true
-	w.PeerManager.Start()
-	go w.fPositiveHandler(w.stopChan, w.maxFilterNewMatches)
+func (mgr *SPVManager) Start() {
+	mgr.running = true
+	mgr.PeerManager.Start()
+	go mgr.fPositiveHandler(mgr.stopChan, mgr.maxFilterNewMatches)
 }
 
-func (w *SPVManager) Close() {
-	if w.running {
+func (mgr *SPVManager) Close() {
+	if mgr.running {
 		log.Info("Disconnecting from peers and shutting down")
-		w.PeerManager.Stop()
-		w.Blockchain.Close()
-		close(w.stopChan)
-		w.running = false
+		mgr.PeerManager.Stop()
+		mgr.Blockchain.Close()
+		mgr.running = false
+		mgr.PeerManager = nil
+		close(mgr.stopChan)
 	}
 }
 
-func (w *SPVManager) startChainDownload(p *peer.Peer) {
+func (mgr *SPVManager) WaitForShutdown() {
+	<-mgr.stopChan
+}
+
+func (mgr *SPVManager) startChainDownload(p *peer.Peer) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error("Unhandled error in startChainDownload", r)
 		}
 	}()
-	w.mutex.Lock()
-	defer w.mutex.Unlock()
-	if w.Blockchain.ChainState() == SYNCING {
-		height, _ := w.Blockchain.db.Height()
+	mgr.mutex.Lock()
+	defer mgr.mutex.Unlock()
+	if mgr.Blockchain.ChainState() == SYNCING {
+		height, _ := mgr.Blockchain.db.Height()
 		if height >= uint32(p.LastBlock()) {
-			moar := w.PeerManager.CheckForMoreBlocks(height)
+			moar := mgr.PeerManager.CheckForMoreBlocks(height)
 			if !moar {
 				log.Info("Chain download complete")
-				w.Blockchain.SetChainState(WAITING)
-				w.Rebroadcast()
+				mgr.Blockchain.SetChainState(WAITING)
+				mgr.Rebroadcast()
 			}
 			return
 		}
 		gBlocks := wire.NewMsgGetBlocks(maxHash)
-		hashes := w.Blockchain.GetBlockLocatorHashes()
+		hashes := mgr.Blockchain.GetBlockLocatorHashes()
 		gBlocks.BlockLocatorHashes = hashes
 		p.QueueMessage(gBlocks, nil)
 	}
@@ -118,7 +152,7 @@ func (w *SPVManager) reset() {
 	w.PeerManager.selectNewDownloadPeer()
 }
 
-func (w *SPVManager) onMerkleBlock(p *peer.Peer, m *wire.MsgMerkleBlock) {
+func (w *SPVManager) OnMerkleBlock(p *peer.Peer, m *wire.MsgMerkleBlock) {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
 
@@ -165,13 +199,13 @@ func (w *SPVManager) onMerkleBlock(p *peer.Peer, m *wire.MsgMerkleBlock) {
 	}
 }
 
-func (w *SPVManager) processBlock(p *peer.Peer, m *wire.MsgMerkleBlock) error {
+func (mgr *SPVManager) processBlock(p *peer.Peer, m *wire.MsgMerkleBlock) error {
 	txids, err := checkMBlock(m)
 	if err != nil {
 		p.Disconnect()
 		return fmt.Errorf("Peer%d sent an invalid MerkleBlock", p.ID())
 	}
-	newBlock, reorg, height, err := w.Blockchain.CommitHeader(m.Header)
+	newBlock, reorg, height, err := mgr.Blockchain.CommitHeader(m.Header)
 	if err != nil {
 		return err
 	}
@@ -181,25 +215,25 @@ func (w *SPVManager) processBlock(p *peer.Peer, m *wire.MsgMerkleBlock) error {
 
 	// We hit a reorg. Rollback the transactions and resync from the reorg point.
 	if reorg != nil {
-		err := w.TxStore.processReorg(reorg.Height)
+		err := ProcessReorg(mgr.TxStore, reorg.Height)
 		if err != nil {
 			log.Error(err)
 		}
-		if w.Blockchain.state != SYNCING {
-			w.Blockchain.SetChainState(SYNCING)
-			w.Blockchain.db.Put(*reorg, true)
-			go w.startChainDownload(p)
+		if mgr.Blockchain.state != SYNCING {
+			mgr.Blockchain.SetChainState(SYNCING)
+			mgr.Blockchain.db.Put(*reorg, true)
+			go mgr.startChainDownload(p)
 			return nil
 		}
 	}
 
 	for _, txid := range txids {
-		w.PeerManager.QueueTxForDownload(p, *txid, int32(height))
+		mgr.PeerManager.QueueTxForDownload(p, *txid, int32(height))
 	}
 
 	log.Debugf("Received Merkle Block %s at height %d\n", m.Header.BlockHash().String(), height)
-	if w.Blockchain.ChainState() == WAITING {
-		txns, err := w.TxStore.Txns().GetAll(false)
+	if mgr.Blockchain.ChainState() == WAITING {
+		txns, err := mgr.TxStore.GetAllTxs(false)
 		if err != nil {
 			return err
 		}
@@ -212,7 +246,7 @@ func (w *SPVManager) processBlock(p *peer.Peer, m *wire.MsgMerkleBlock) error {
 					log.Error(err)
 					continue
 				}
-				err = w.TxStore.markAsDead(*h)
+				err = mgr.TxStore.MarkAsDead(*h)
 				if err != nil {
 					log.Error(err)
 					continue
@@ -224,38 +258,38 @@ func (w *SPVManager) processBlock(p *peer.Peer, m *wire.MsgMerkleBlock) error {
 	return nil
 }
 
-func (w *SPVManager) onTx(p *peer.Peer, m *wire.MsgTx) {
-	w.mutex.Lock()
-	height, err := w.PeerManager.DequeueTx(p, m.TxHash())
+func (mgr *SPVManager) OnTx(p *peer.Peer, m *wire.MsgTx) {
+	mgr.mutex.Lock()
+	height, err := mgr.PeerManager.DequeueTx(p, m.TxHash())
 	if err != nil {
-		w.mutex.Unlock()
+		mgr.mutex.Unlock()
 		return
 	}
-	w.mutex.Unlock()
+	mgr.mutex.Unlock()
 
-	hits, err := w.TxStore.Ingest(m, height)
+	hits, err := mgr.TxStore.Ingest(m, height)
 	if err != nil {
 		log.Errorf("Error ingesting tx: %s\n", err.Error())
 		return
 	}
 	if hits == 0 {
 		log.Debugf("Tx %s from Peer%d had no hits, filter false positive.", m.TxHash().String(), p.ID())
-		w.fPositives <- p
+		mgr.fPositives <- p
 		return
 	}
-	w.updateFilterAndSend(p)
+	updateFilterAndSend(p, mgr.TxStore)
 	log.Infof("Tx %s from Peer%d ingested at height %d", m.TxHash().String(), p.ID(), height)
 }
 
-func (w *SPVManager) onInv(p *peer.Peer, m *wire.MsgInv) {
+func (mgr *SPVManager) OnInv(p *peer.Peer, m *wire.MsgInv) {
 	go func() {
 		defer func() {
-			w.mutex.Unlock()
+			mgr.mutex.Unlock()
 			if err := recover(); err != nil {
 				log.Error(err)
 			}
 		}()
-		w.mutex.Lock()
+		mgr.mutex.Lock()
 		for _, inv := range m.InvList {
 			switch inv.Type {
 			case wire.InvTypeBlock:
@@ -266,11 +300,11 @@ func (w *SPVManager) onInv(p *peer.Peer, m *wire.MsgInv) {
 				gData := wire.NewMsgGetData()
 				gData.AddInvVect(inv)
 				p.QueueMessage(gData, nil)
-				if w.Blockchain.ChainState() == SYNCING && w.PeerManager.DownloadPeer() != nil && w.PeerManager.DownloadPeer().ID() == p.ID() {
-					w.requests.add(&inv.Hash)
+				if mgr.Blockchain.ChainState() == SYNCING && mgr.PeerManager.DownloadPeer() != nil && mgr.PeerManager.DownloadPeer().ID() == p.ID() {
+					mgr.requests.add(&inv.Hash)
 				}
 			case wire.InvTypeTx:
-				w.PeerManager.QueueTxForDownload(p, inv.Hash, 0)
+				mgr.PeerManager.QueueTxForDownload(p, inv.Hash, 0)
 				gData := wire.NewMsgGetData()
 				gData.AddInvVect(inv)
 				p.QueueMessage(gData, nil)
@@ -282,16 +316,16 @@ func (w *SPVManager) onInv(p *peer.Peer, m *wire.MsgInv) {
 	}()
 }
 
-func (w *SPVManager) onReject(p *peer.Peer, m *wire.MsgReject) {
+func (mgr *SPVManager) onReject(p *peer.Peer, m *wire.MsgReject) {
 	log.Warningf("Received reject message from peer %d: Code: %s, Hash %s, Reason: %s", int(p.ID()), m.Code.String(), m.Hash.String(), m.Reason)
 }
 
-func (w *SPVManager) onGetData(p *peer.Peer, m *wire.MsgGetData) {
+func (mgr *SPVManager) OnGetData(p *peer.Peer, m *wire.MsgGetData) {
 	log.Debugf("Received getdata request from Peer%d\n", p.ID())
 	var sent int32
 	for _, thing := range m.InvList {
 		if thing.Type == wire.InvTypeTx {
-			tx, _, err := w.TxStore.Txns().Get(thing.Hash)
+			tx, _, err := mgr.TxStore.GetTx(thing.Hash)
 			if err != nil {
 				log.Errorf("Error getting tx %s: %s", thing.Hash.String(), err.Error())
 				continue
@@ -307,32 +341,32 @@ func (w *SPVManager) onGetData(p *peer.Peer, m *wire.MsgGetData) {
 	log.Debugf("Sent %d of %d requested items to Peer%d", sent, len(m.InvList), p.ID())
 }
 
-func (w *SPVManager) fPositiveHandler(quit chan int, maxFilterNewMatches uint32) {
+func (mgr *SPVManager) fPositiveHandler(quit chan int, maxFilterNewMatches uint32) {
 exit:
 	for {
 		select {
-		case peer := <-w.fPositives:
-			w.mutex.RLock()
-			falsePostives, _ := w.fpAccumulator[peer.ID()]
-			w.mutex.RUnlock()
+		case peer := <-mgr.fPositives:
+			mgr.mutex.RLock()
+			falsePostives, _ := mgr.fpAccumulator[peer.ID()]
+			mgr.mutex.RUnlock()
 			falsePostives++
 			if falsePostives > maxFilterNewMatches {
-				w.updateFilterAndSend(peer)
+				updateFilterAndSend(peer, mgr.TxStore)
 				log.Debugf("Reset %d false positives for Peer%d\n", falsePostives, peer.ID())
 				// reset accumulator
 				falsePostives = 0
 			}
-			w.mutex.Lock()
-			w.fpAccumulator[peer.ID()] = falsePostives
-			w.mutex.Unlock()
+			mgr.mutex.Lock()
+			mgr.fpAccumulator[peer.ID()] = falsePostives
+			mgr.mutex.Unlock()
 		case <-quit:
 			break exit
 		}
 	}
 }
 
-func (w *SPVManager) updateFilterAndSend(p *peer.Peer) {
-	filt, err := w.TxStore.GimmeFilter()
+func updateFilterAndSend(p *peer.Peer, tx TxStore) {
+	filt, err := tx.GimmeFilter()
 	if err != nil {
 		log.Errorf("Error creating filter: %s\n", err.Error())
 		return
@@ -342,16 +376,16 @@ func (w *SPVManager) updateFilterAndSend(p *peer.Peer) {
 	log.Debugf("Sent filter to Peer%d\n", p.ID())
 }
 
-func (w *SPVManager) Rebroadcast() {
+func (mgr *SPVManager) Rebroadcast() {
 	// get all unconfirmed txs
-	invMsg, err := w.TxStore.GetPendingInv()
+	invMsg, err := mgr.TxStore.GetPendingInv()
 	if err != nil {
 		log.Errorf("Rebroadcast error: %s", err.Error())
 	}
 	if len(invMsg.InvList) == 0 { // nothing to broadcast, so don't
 		return
 	}
-	for _, peer := range w.PeerManager.ReadyPeers() {
+	for _, peer := range mgr.PeerManager.ReadyPeers() {
 		peer.QueueMessage(invMsg, nil)
 	}
 }
