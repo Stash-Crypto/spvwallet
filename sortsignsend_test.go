@@ -2,12 +2,13 @@ package spvwallet
 
 import (
 	"bytes"
+	"os"
+	"testing"
+
 	"github.com/OpenBazaar/wallet-interface"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
-	"os"
-	"testing"
 )
 
 func MockWallet() *SPVWallet {
@@ -24,7 +25,15 @@ func MockWallet() *SPVWallet {
 	createBlockChain(bc)
 
 	peerManager, _ := NewPeerManager(peerCfg)
-	return &SPVWallet{txstore: txstore, peerManager: peerManager, blockchain: bc, keyManager: txstore.keyManager, params: &chaincfg.TestNet3Params}
+	return &SPVWallet{
+		params:     &chaincfg.TestNet3Params,
+		keyManager: txstore.keyManager,
+		mgr: &SPVManager{
+			TxStore:     txstore,
+			PeerManager: peerManager,
+			Blockchain:  bc,
+		},
+	}
 }
 
 func Test_gatherCoins(t *testing.T) {
@@ -46,7 +55,7 @@ func Test_gatherCoins(t *testing.T) {
 		t.Error(err)
 	}
 	op := wire.NewOutPoint(h1, 0)
-	err = w.txstore.Utxos().Put(wallet.Utxo{Op: *op, ScriptPubkey: script1, AtHeight: 5, Value: 10000})
+	err = w.mgr.TxStore.Utxos().Put(wallet.Utxo{Op: *op, ScriptPubkey: script1, AtHeight: 5, Value: 10000})
 	if err != nil {
 		t.Error(err)
 	}
@@ -61,7 +70,7 @@ func Test_gatherCoins(t *testing.T) {
 		if !coin.Hash().IsEqual(h1) {
 			t.Error("Returned incorrect hash")
 		}
-		height, _ := w.blockchain.db.Height()
+		height, _ := w.mgr.Blockchain.db.Height()
 		if coin.NumConfs() != int64(height-5) {
 			t.Error("Returned incorrect number of confirmations")
 		}

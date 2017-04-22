@@ -2,6 +2,7 @@ package spvwallet
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -24,7 +25,67 @@ func init() {
 	maxHash = h
 }
 
-func (w *SPVWallet) startChainDownload(p *peer.Peer) {
+type SPVManager struct {
+	mutex *sync.RWMutex
+
+	running  bool
+	stopChan chan int
+
+	Blockchain  *Blockchain
+	TxStore     *TxStore
+	PeerManager *PeerManager
+
+	fPositives    chan *peer.Peer
+	fpAccumulator map[int32]uint32
+	blockQueue    chan chainhash.Hash
+	toDownload    map[chainhash.Hash]int32
+
+	requests blockRequests
+
+	// maxFilterNewMatches is the maximum number of matches that
+	// to a filter which we have received before we recreate and load
+	// a new filter.
+	maxFilterNewMatches uint32
+}
+
+func NewSPVManager(tx *TxStore, b *Blockchain, pm *PeerManager, config *Config) *SPVManager {
+	maxFilterNewMatches := config.MaxFilterNewMatches
+	if maxFilterNewMatches == 0 {
+		maxFilterNewMatches = DefaultMaxFilterNewMatches
+	}
+	spv := &SPVManager{
+		fPositives:          make(chan *peer.Peer),
+		fpAccumulator:       make(map[int32]uint32),
+		blockQueue:          make(chan chainhash.Hash, 32),
+		toDownload:          make(map[chainhash.Hash]int32),
+		mutex:               new(sync.RWMutex),
+		Blockchain:          b,
+		TxStore:             tx,
+		PeerManager:         pm,
+		maxFilterNewMatches: maxFilterNewMatches,
+	}
+
+	spv.requests.reset()
+	return spv
+}
+
+func (w *SPVManager) Start() {
+	w.running = true
+	w.PeerManager.Start()
+	go w.fPositiveHandler(w.stopChan, w.maxFilterNewMatches)
+}
+
+func (w *SPVManager) Close() {
+	if w.running {
+		log.Info("Disconnecting from peers and shutting down")
+		w.PeerManager.Stop()
+		w.Blockchain.Close()
+		close(w.stopChan)
+		w.running = false
+	}
+}
+
+func (w *SPVManager) startChainDownload(p *peer.Peer) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error("Unhandled error in startChainDownload", r)
@@ -32,39 +93,39 @@ func (w *SPVWallet) startChainDownload(p *peer.Peer) {
 	}()
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
-	if w.blockchain.ChainState() == SYNCING {
-		height, _ := w.blockchain.db.Height()
+	if w.Blockchain.ChainState() == SYNCING {
+		height, _ := w.Blockchain.db.Height()
 		if height >= uint32(p.LastBlock()) {
-			moar := w.peerManager.CheckForMoreBlocks(height)
+			moar := w.PeerManager.CheckForMoreBlocks(height)
 			if !moar {
 				log.Info("Chain download complete")
-				w.blockchain.SetChainState(WAITING)
+				w.Blockchain.SetChainState(WAITING)
 				w.Rebroadcast()
 			}
 			return
 		}
 		gBlocks := wire.NewMsgGetBlocks(maxHash)
-		hashes := w.blockchain.GetBlockLocatorHashes()
+		hashes := w.Blockchain.GetBlockLocatorHashes()
 		gBlocks.BlockLocatorHashes = hashes
 		p.QueueMessage(gBlocks, nil)
 	}
 }
 
-func (w *SPVWallet) reset() {
+func (w *SPVManager) reset() {
 	w.requests.reset()
 
 	// Select a new download peer.
-	w.peerManager.selectNewDownloadPeer()
+	w.PeerManager.selectNewDownloadPeer()
 }
 
-func (w *SPVWallet) onMerkleBlock(p *peer.Peer, m *wire.MsgMerkleBlock) {
+func (w *SPVManager) onMerkleBlock(p *peer.Peer, m *wire.MsgMerkleBlock) {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
 
 	var err error
 	// If this is the sync peer, there are potentially
-	if w.blockchain.ChainState() == SYNCING && w.peerManager.DownloadPeer() != nil && w.peerManager.DownloadPeer().ID() == p.ID() {
-		best, _ := w.blockchain.db.GetBestHeader()
+	if w.Blockchain.ChainState() == SYNCING && w.PeerManager.DownloadPeer() != nil && w.PeerManager.DownloadPeer().ID() == p.ID() {
+		best, _ := w.Blockchain.db.GetBestHeader()
 		hash := best.Header.BlockHash()
 
 		// We may need to process multiple cached block headers.
@@ -104,13 +165,13 @@ func (w *SPVWallet) onMerkleBlock(p *peer.Peer, m *wire.MsgMerkleBlock) {
 	}
 }
 
-func (w *SPVWallet) processBlock(p *peer.Peer, m *wire.MsgMerkleBlock) error {
+func (w *SPVManager) processBlock(p *peer.Peer, m *wire.MsgMerkleBlock) error {
 	txids, err := checkMBlock(m)
 	if err != nil {
 		p.Disconnect()
 		return fmt.Errorf("Peer%d sent an invalid MerkleBlock", p.ID())
 	}
-	newBlock, reorg, height, err := w.blockchain.CommitHeader(m.Header)
+	newBlock, reorg, height, err := w.Blockchain.CommitHeader(m.Header)
 	if err != nil {
 		return err
 	}
@@ -120,25 +181,25 @@ func (w *SPVWallet) processBlock(p *peer.Peer, m *wire.MsgMerkleBlock) error {
 
 	// We hit a reorg. Rollback the transactions and resync from the reorg point.
 	if reorg != nil {
-		err := w.txstore.processReorg(reorg.Height)
+		err := w.TxStore.processReorg(reorg.Height)
 		if err != nil {
 			log.Error(err)
 		}
-		if w.blockchain.state != SYNCING {
-			w.blockchain.SetChainState(SYNCING)
-			w.blockchain.db.Put(*reorg, true)
+		if w.Blockchain.state != SYNCING {
+			w.Blockchain.SetChainState(SYNCING)
+			w.Blockchain.db.Put(*reorg, true)
 			go w.startChainDownload(p)
 			return nil
 		}
 	}
 
 	for _, txid := range txids {
-		w.peerManager.QueueTxForDownload(p, *txid, int32(height))
+		w.PeerManager.QueueTxForDownload(p, *txid, int32(height))
 	}
 
 	log.Debugf("Received Merkle Block %s at height %d\n", m.Header.BlockHash().String(), height)
-	if w.blockchain.ChainState() == WAITING {
-		txns, err := w.txstore.Txns().GetAll(false)
+	if w.Blockchain.ChainState() == WAITING {
+		txns, err := w.TxStore.Txns().GetAll(false)
 		if err != nil {
 			return err
 		}
@@ -151,7 +212,7 @@ func (w *SPVWallet) processBlock(p *peer.Peer, m *wire.MsgMerkleBlock) error {
 					log.Error(err)
 					continue
 				}
-				err = w.txstore.markAsDead(*h)
+				err = w.TxStore.markAsDead(*h)
 				if err != nil {
 					log.Error(err)
 					continue
@@ -163,15 +224,16 @@ func (w *SPVWallet) processBlock(p *peer.Peer, m *wire.MsgMerkleBlock) error {
 	return nil
 }
 
-func (w *SPVWallet) onTx(p *peer.Peer, m *wire.MsgTx) {
+func (w *SPVManager) onTx(p *peer.Peer, m *wire.MsgTx) {
 	w.mutex.Lock()
-	height, err := w.peerManager.DequeueTx(p, m.TxHash())
+	height, err := w.PeerManager.DequeueTx(p, m.TxHash())
 	if err != nil {
 		w.mutex.Unlock()
 		return
 	}
 	w.mutex.Unlock()
-	hits, err := w.txstore.Ingest(m, height)
+
+	hits, err := w.TxStore.Ingest(m, height)
 	if err != nil {
 		log.Errorf("Error ingesting tx: %s\n", err.Error())
 		return
@@ -185,7 +247,7 @@ func (w *SPVWallet) onTx(p *peer.Peer, m *wire.MsgTx) {
 	log.Infof("Tx %s from Peer%d ingested at height %d", m.TxHash().String(), p.ID(), height)
 }
 
-func (w *SPVWallet) onInv(p *peer.Peer, m *wire.MsgInv) {
+func (w *SPVManager) onInv(p *peer.Peer, m *wire.MsgInv) {
 	go func() {
 		defer func() {
 			w.mutex.Unlock()
@@ -204,11 +266,11 @@ func (w *SPVWallet) onInv(p *peer.Peer, m *wire.MsgInv) {
 				gData := wire.NewMsgGetData()
 				gData.AddInvVect(inv)
 				p.QueueMessage(gData, nil)
-				if w.blockchain.ChainState() == SYNCING && w.peerManager.DownloadPeer() != nil && w.peerManager.DownloadPeer().ID() == p.ID() {
+				if w.Blockchain.ChainState() == SYNCING && w.PeerManager.DownloadPeer() != nil && w.PeerManager.DownloadPeer().ID() == p.ID() {
 					w.requests.add(&inv.Hash)
 				}
 			case wire.InvTypeTx:
-				w.peerManager.QueueTxForDownload(p, inv.Hash, 0)
+				w.PeerManager.QueueTxForDownload(p, inv.Hash, 0)
 				gData := wire.NewMsgGetData()
 				gData.AddInvVect(inv)
 				p.QueueMessage(gData, nil)
@@ -220,16 +282,16 @@ func (w *SPVWallet) onInv(p *peer.Peer, m *wire.MsgInv) {
 	}()
 }
 
-func (w *SPVWallet) onReject(p *peer.Peer, m *wire.MsgReject) {
+func (w *SPVManager) onReject(p *peer.Peer, m *wire.MsgReject) {
 	log.Warningf("Received reject message from peer %d: Code: %s, Hash %s, Reason: %s", int(p.ID()), m.Code.String(), m.Hash.String(), m.Reason)
 }
 
-func (w *SPVWallet) onGetData(p *peer.Peer, m *wire.MsgGetData) {
+func (w *SPVManager) onGetData(p *peer.Peer, m *wire.MsgGetData) {
 	log.Debugf("Received getdata request from Peer%d\n", p.ID())
 	var sent int32
 	for _, thing := range m.InvList {
 		if thing.Type == wire.InvTypeTx {
-			tx, _, err := w.txstore.Txns().Get(thing.Hash)
+			tx, _, err := w.TxStore.Txns().Get(thing.Hash)
 			if err != nil {
 				log.Errorf("Error getting tx %s: %s", thing.Hash.String(), err.Error())
 				continue
@@ -245,8 +307,7 @@ func (w *SPVWallet) onGetData(p *peer.Peer, m *wire.MsgGetData) {
 	log.Debugf("Sent %d of %d requested items to Peer%d", sent, len(m.InvList), p.ID())
 }
 
-func (w *SPVWallet) fPositiveHandler(quit chan int, maxFilterNewMatches uint32) {
-
+func (w *SPVManager) fPositiveHandler(quit chan int, maxFilterNewMatches uint32) {
 exit:
 	for {
 		select {
@@ -270,8 +331,8 @@ exit:
 	}
 }
 
-func (w *SPVWallet) updateFilterAndSend(p *peer.Peer) {
-	filt, err := w.txstore.GimmeFilter()
+func (w *SPVManager) updateFilterAndSend(p *peer.Peer) {
+	filt, err := w.TxStore.GimmeFilter()
 	if err != nil {
 		log.Errorf("Error creating filter: %s\n", err.Error())
 		return
@@ -281,16 +342,16 @@ func (w *SPVWallet) updateFilterAndSend(p *peer.Peer) {
 	log.Debugf("Sent filter to Peer%d\n", p.ID())
 }
 
-func (w *SPVWallet) Rebroadcast() {
+func (w *SPVManager) Rebroadcast() {
 	// get all unconfirmed txs
-	invMsg, err := w.txstore.GetPendingInv()
+	invMsg, err := w.TxStore.GetPendingInv()
 	if err != nil {
 		log.Errorf("Rebroadcast error: %s", err.Error())
 	}
 	if len(invMsg.InvList) == 0 { // nothing to broadcast, so don't
 		return
 	}
-	for _, peer := range w.peerManager.ReadyPeers() {
+	for _, peer := range w.PeerManager.ReadyPeers() {
 		peer.QueueMessage(invMsg, nil)
 	}
 }

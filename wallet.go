@@ -33,10 +33,7 @@ type SPVWallet struct {
 
 	repoPath string
 
-	blockchain  *Blockchain
-	txstore     *TxStore
-	peerManager *PeerManager
-	keyManager  *KeyManager
+	keyManager *KeyManager
 
 	fPositives    chan *peer.Peer
 	stopChan      chan int
@@ -55,6 +52,8 @@ type SPVWallet struct {
 	// to a filter which we have received before we recreate and load
 	// a new filter.
 	maxFilterNewMatches uint32
+
+	mgr *SPVManager
 }
 
 var log = logging.MustGetLogger("bitcoin")
@@ -87,10 +86,6 @@ func NewSPVWallet(config *Config) (*SPVWallet, error) {
 	if err != nil {
 		return nil, err
 	}
-	maxFilterNewMatches := config.MaxFilterNewMatches
-	if maxFilterNewMatches == 0 {
-		maxFilterNewMatches = DefaultMaxFilterNewMatches
-	}
 
 	w := &SPVWallet{
 		repoPath:         config.RepoPath,
@@ -110,15 +105,16 @@ func NewSPVWallet(config *Config) (*SPVWallet, error) {
 		fPositives:          make(chan *peer.Peer),
 		stopChan:            make(chan int),
 		fpAccumulator:       make(map[int32]uint32),
+		maxFilterNewMatches: config.MaxFilterNewMatches,
 		mutex:               new(sync.RWMutex),
-		maxFilterNewMatches: maxFilterNewMatches,
 	}
 
-	w.requests.reset()
-
 	w.keyManager, err = NewKeyManager(config.DB.Keys(), w.params, w.masterPrivateKey)
+	if err != nil {
+		return nil, err
+	}
 
-	w.txstore, err = NewTxStore(w.params, config.DB, w.keyManager)
+	txStore, err := NewTxStore(w.params, config.DB, w.keyManager)
 	if err != nil {
 		return nil, err
 	}
@@ -127,25 +123,32 @@ func NewSPVWallet(config *Config) (*SPVWallet, error) {
 	if err != nil {
 		return nil, err
 	}
-	w.blockchain, err = NewBlockchain(hdb, w.creationDate, w.params)
+	blockchain, err := NewBlockchain(hdb, w.creationDate, w.params)
 	if err != nil {
 		return nil, err
 	}
 
+	peerManager, err := NewPeerManager(w.config)
+	if err != nil {
+		return nil, err
+	}
+
+	w.mgr = NewSPVManager(txStore, blockchain, peerManager, config)
+
 	listeners := &peer.MessageListeners{
-		OnMerkleBlock: w.onMerkleBlock,
-		OnInv:         w.onInv,
-		OnTx:          w.onTx,
-		OnGetData:     w.onGetData,
-		OnReject:      w.onReject,
+		OnMerkleBlock: w.mgr.onMerkleBlock,
+		OnInv:         w.mgr.onInv,
+		OnTx:          w.mgr.onTx,
+		OnGetData:     w.mgr.onGetData,
+		OnReject:      w.mgr.onReject,
 	}
 
 	getNewestBlock := func() (*chainhash.Hash, int32, error) {
-		storedHeader, err := w.blockchain.db.GetBestHeader()
+		storedHeader, err := w.mgr.Blockchain.db.GetBestHeader()
 		if err != nil {
 			return nil, 0, err
 		}
-		height, err := w.blockchain.db.Height()
+		height, err := w.mgr.Blockchain.db.Height()
 		if err != nil {
 			return nil, 0, err
 		}
@@ -158,8 +161,8 @@ func NewSPVWallet(config *Config) (*SPVWallet, error) {
 		UserAgentVersion:   WALLET_VERSION,
 		Params:             w.params,
 		AddressCacheDir:    config.RepoPath,
-		GetFilter:          w.txstore.GimmeFilter,
-		StartChainDownload: w.startChainDownload,
+		GetFilter:          w.mgr.TxStore.GimmeFilter,
+		StartChainDownload: w.mgr.startChainDownload,
 		GetNewestBlock:     getNewestBlock,
 		Listeners:          listeners,
 		Proxy:              config.Proxy,
@@ -169,18 +172,11 @@ func NewSPVWallet(config *Config) (*SPVWallet, error) {
 		w.config.TrustedPeer = config.TrustedPeer
 	}
 
-	w.peerManager, err = NewPeerManager(w.config)
-	if err != nil {
-		return nil, err
-	}
-
 	return w, nil
 }
 
 func (w *SPVWallet) Start() {
-	w.running = true
-	go w.peerManager.Start()
-	w.fPositiveHandler(w.stopChan, w.maxFilterNewMatches)
+	w.mgr.Start()
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -214,7 +210,7 @@ func (w *SPVWallet) Mnemonic() string {
 }
 
 func (w *SPVWallet) ConnectedPeers() []*peer.Peer {
-	return w.peerManager.ReadyPeers()
+	return w.mgr.PeerManager.ReadyPeers()
 }
 
 func (w *SPVWallet) CurrentAddress(purpose wallet.KeyPurpose) btc.Address {
@@ -224,11 +220,11 @@ func (w *SPVWallet) CurrentAddress(purpose wallet.KeyPurpose) btc.Address {
 }
 
 func (w *SPVWallet) NewAddress(purpose wallet.KeyPurpose) btc.Address {
-	i, _ := w.txstore.Keys().GetUnused(purpose)
+	i, _ := w.mgr.TxStore.Keys().GetUnused(purpose)
 	key, _ := w.keyManager.generateChildKey(purpose, uint32(i[1]))
 	addr, _ := key.Address(w.params)
-	w.txstore.Keys().MarkKeyAsUsed(addr.ScriptAddress())
-	w.txstore.PopulateAdrs()
+	w.mgr.TxStore.Keys().MarkKeyAsUsed(addr.ScriptAddress())
+	w.mgr.TxStore.PopulateAdrs()
 	return btc.Address(addr)
 }
 
@@ -294,8 +290,8 @@ func (w *SPVWallet) ListKeys() []btcec.PrivateKey {
 }
 
 func (w *SPVWallet) Balance() (confirmed, unconfirmed int64) {
-	utxos, _ := w.txstore.Utxos().GetAll()
-	stxos, _ := w.txstore.Stxos().GetAll()
+	utxos, _ := w.mgr.TxStore.Utxos().GetAll()
+	stxos, _ := w.mgr.TxStore.Stxos().GetAll()
 	for _, utxo := range utxos {
 		if !utxo.WatchOnly {
 			if utxo.AtHeight > 0 {
@@ -313,16 +309,16 @@ func (w *SPVWallet) Balance() (confirmed, unconfirmed int64) {
 }
 
 func (w *SPVWallet) Transactions() ([]wallet.Txn, error) {
-	return w.txstore.Txns().GetAll(false)
+	return w.mgr.TxStore.Txns().GetAll(false)
 }
 
 func (w *SPVWallet) GetTransaction(txid chainhash.Hash) (wallet.Txn, error) {
-	_, txn, err := w.txstore.Txns().Get(txid)
+	_, txn, err := w.mgr.TxStore.Txns().Get(txid)
 	return txn, err
 }
 
 func (w *SPVWallet) GetConfirmations(txid chainhash.Hash) (uint32, uint32, error) {
-	_, txn, err := w.txstore.Txns().Get(txid)
+	_, txn, err := w.mgr.TxStore.Txns().Get(txid)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -359,12 +355,12 @@ func (w *SPVWallet) Params() *chaincfg.Params {
 }
 
 func (w *SPVWallet) AddTransactionListener(callback func(wallet.TransactionCallback)) {
-	w.txstore.listeners = append(w.txstore.listeners, callback)
+	w.mgr.TxStore.listeners = append(w.mgr.TxStore.listeners, callback)
 }
 
 func (w *SPVWallet) ChainTip() (uint32, chainhash.Hash) {
 	var ch chainhash.Hash
-	sh, err := w.blockchain.db.GetBestHeader()
+	sh, err := w.mgr.Blockchain.db.GetBestHeader()
 	if err != nil {
 		return 0, ch
 	}
@@ -372,27 +368,21 @@ func (w *SPVWallet) ChainTip() (uint32, chainhash.Hash) {
 }
 
 func (w *SPVWallet) AddWatchedScript(script []byte) error {
-	err := w.txstore.WatchedScripts().Put(script)
-	w.txstore.PopulateAdrs()
+	err := w.mgr.TxStore.WatchedScripts().Put(script)
+	w.mgr.TxStore.PopulateAdrs()
 
-	for _, peer := range w.peerManager.ReadyPeers() {
-		w.updateFilterAndSend(peer)
+	for _, peer := range w.mgr.PeerManager.ReadyPeers() {
+		w.mgr.updateFilterAndSend(peer)
 	}
 	return err
 }
 
 func (w *SPVWallet) DumpHeaders(writer io.Writer) {
-	w.blockchain.db.Print(writer)
+	w.mgr.Blockchain.db.Print(writer)
 }
 
 func (w *SPVWallet) Close() {
-	if w.running {
-		log.Info("Disconnecting from peers and shutting down")
-		w.peerManager.Stop()
-		w.blockchain.Close()
-		w.stopChan <- 1
-		w.running = false
-	}
+	w.mgr.Close()
 }
 
 func (w *SPVWallet) ReSyncBlockchain(fromDate time.Time) {
@@ -406,12 +396,12 @@ func (w *SPVWallet) ReSyncBlockchain(fromDate time.Time) {
 	if err != nil {
 		return
 	}
-	w.blockchain = blockchain
-	w.txstore.PopulateAdrs()
-	w.peerManager, err = NewPeerManager(w.config)
+	w.mgr.Blockchain = blockchain
+	w.mgr.TxStore.PopulateAdrs()
+	w.mgr.PeerManager, err = NewPeerManager(w.config)
 	if err != nil {
 		return
 	}
-	w.requests.reset()
+	w.mgr.requests.reset()
 	go w.Start()
 }

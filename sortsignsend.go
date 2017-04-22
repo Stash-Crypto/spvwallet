@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"time"
+
 	"github.com/OpenBazaar/wallet-interface"
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/btcec"
@@ -18,13 +20,12 @@ import (
 	"github.com/btcsuite/btcutil/txsort"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
-	"time"
 )
 
-func (s *SPVWallet) Broadcast(tx *wire.MsgTx) error {
+func (s *SPVManager) Broadcast(tx *wire.MsgTx) error {
 
 	// Our own tx; don't keep track of false positives
-	_, err := s.txstore.Ingest(tx, 0)
+	_, err := s.TxStore.Ingest(tx, 0)
 	if err != nil {
 		return err
 	}
@@ -39,7 +40,7 @@ func (s *SPVWallet) Broadcast(tx *wire.MsgTx) error {
 	}
 
 	log.Debugf("Broadcasting tx %s to peers", tx.TxHash().String())
-	for _, peer := range s.peerManager.ReadyPeers() {
+	for _, peer := range s.PeerManager.ReadyPeers() {
 		peer.QueueMessage(invMsg, nil)
 		s.updateFilterAndSend(peer)
 	}
@@ -74,8 +75,8 @@ func NewCoin(txid []byte, index uint32, value btc.Amount, numConfs int64, script
 }
 
 func (w *SPVWallet) gatherCoins() map[coinset.Coin]*hd.ExtendedKey {
-	height, _ := w.blockchain.db.Height()
-	utxos, _ := w.txstore.Utxos().GetAll()
+	height, _ := w.mgr.Blockchain.db.Height()
+	utxos, _ := w.mgr.TxStore.Utxos().GetAll()
 	m := make(map[coinset.Coin]*hd.ExtendedKey)
 	for _, u := range utxos {
 		if u.WatchOnly {
@@ -105,7 +106,7 @@ func (w *SPVWallet) Spend(amount int64, addr btc.Address, feeLevel wallet.FeeLev
 		return nil, err
 	}
 	// Broadcast
-	err = w.Broadcast(tx)
+	err = w.mgr.Broadcast(tx)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +119,7 @@ var BumpFeeTransactionDeadError = errors.New("Cannot bump fee of dead transactio
 var BumpFeeNotFoundError = errors.New("Transaction either doesn't exist or has already been spent")
 
 func (w *SPVWallet) BumpFee(txid chainhash.Hash) (*chainhash.Hash, error) {
-	_, txn, err := w.txstore.Txns().Get(txid)
+	_, txn, err := w.mgr.TxStore.Txns().Get(txid)
 	if err != nil {
 		return nil, err
 	}
@@ -129,14 +130,14 @@ func (w *SPVWallet) BumpFee(txid chainhash.Hash) (*chainhash.Hash, error) {
 		return nil, BumpFeeTransactionDeadError
 	}
 	// Check stxos for RBF opportunity
-	/*stxos, _ := w.txstore.Stxos().GetAll()
+	/*stxos, _ := w.txStore.Stxos().GetAll()
 	for _, s := range stxos {
 		if s.SpendTxid.IsEqual(&txid) {
 			r := bytes.NewReader(txn.Bytes)
 			msgTx := wire.NewMsgTx(1)
 			msgTx.BtcDecode(r, 1)
 			for i, output := range msgTx.TxOut {
-				key, err := w.txstore.GetKeyForScript(output.PkScript)
+				key, err := w.txStore.GetKeyForScript(output.PkScript)
 				if key != nil && err == nil { // This is our change output
 					// Calculate change - additional fee
 					feePerByte := w.GetFeePerByte(PRIOIRTY)
@@ -166,7 +167,7 @@ func (w *SPVWallet) BumpFee(txid chainhash.Hash) (*chainhash.Hash, error) {
 					//TODO: Re-sign transaction
 
 					// Mark original tx as dead
-					if err = w.txstore.markAsDead(txid); err != nil {
+					if err = w.txStore.markAsDead(txid); err != nil {
 						return nil, err
 					}
 
@@ -181,7 +182,7 @@ func (w *SPVWallet) BumpFee(txid chainhash.Hash) (*chainhash.Hash, error) {
 		}
 	}*/
 	// Check utxos for CPFP
-	utxos, _ := w.txstore.Utxos().GetAll()
+	utxos, _ := w.mgr.TxStore.Utxos().GetAll()
 	for _, u := range utxos {
 		if u.Op.Hash.IsEqual(&txid) && u.AtHeight == 0 {
 			addr, err := w.ScriptToAddress(u.ScriptPubkey)
@@ -396,7 +397,7 @@ func (w *SPVWallet) Multisign(ins []wallet.TransactionInput, outs []wallet.Trans
 	}
 	// broadcast
 	if broadcast {
-		w.Broadcast(tx)
+		w.mgr.Broadcast(tx)
 	}
 	var buf bytes.Buffer
 	tx.BtcEncode(&buf, wire.ProtocolVersion, wire.WitnessEncoding)
@@ -526,7 +527,7 @@ func (w *SPVWallet) SweepAddress(utxos []wallet.Utxo, address *btc.Address, key 
 	}
 
 	// broadcast
-	w.Broadcast(tx)
+	w.mgr.Broadcast(tx)
 	txid := tx.TxHash()
 	return &txid, nil
 }
