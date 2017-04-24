@@ -3,13 +3,14 @@ package spvwallet
 import (
 	"bytes"
 	"crypto/rand"
-	"github.com/boltdb/bolt"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
 	"math/big"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/boltdb/bolt"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/wire"
 )
 
 var (
@@ -48,24 +49,24 @@ func init() {
 	buf.Write(header3Bytes)
 	testHdr3.Deserialize(&buf)
 	testSh1 = StoredHeader{
-		header:    testHdr1,
-		height:    100,
-		totalWork: big.NewInt(500),
+		Header:    testHdr1,
+		Height:    100,
+		TotalWork: big.NewInt(500),
 	}
 	testSh2 = StoredHeader{
-		header:    testHdr2,
-		height:    200,
-		totalWork: big.NewInt(1000),
+		Header:    testHdr2,
+		Height:    200,
+		TotalWork: big.NewInt(1000),
 	}
 	testSh3 = StoredHeader{
-		header:    testHdr3,
-		height:    200,
-		totalWork: big.NewInt(1000),
+		Header:    testHdr3,
+		Height:    200,
+		TotalWork: big.NewInt(1000),
 	}
 }
 
 func TestSerializeHeader(t *testing.T) {
-	b, err := serializeHeader(testSh1)
+	b, err := SerializeHeader(testSh1)
 	if err != nil {
 		t.Error(err)
 	}
@@ -87,19 +88,19 @@ func TestSerializeHeader(t *testing.T) {
 func TestDeserializeHeader(t *testing.T) {
 	height := []byte{0x00, 0x00, 0x00, 0x64}
 	work := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xf4}
-	sh, err := deserializeHeader(append(header1Bytes, append(height, work...)...))
+	sh, err := DeserializeHeader(append(header1Bytes, append(height, work...)...))
 	if err != nil {
 		t.Error(err)
 	}
-	shHash := sh.header.BlockHash()
+	shHash := sh.Header.BlockHash()
 	testHdrHash := testHdr1.BlockHash()
 	if !testHdrHash.IsEqual(&shHash) {
 		t.Error("Failed to serialize block header")
 	}
-	if sh.height != 100 {
+	if sh.Height != 100 {
 		t.Error("Failed to serialize height")
 	}
-	if sh.totalWork.Cmp(big.NewInt(500)) != 0 {
+	if sh.TotalWork.Cmp(big.NewInt(500)) != 0 {
 		t.Error("Failed to serialize total work")
 	}
 }
@@ -116,12 +117,12 @@ func TestHeaderDB_Put(t *testing.T) {
 	}
 	err = headers.db.View(func(btx *bolt.Tx) error {
 		hdrs := btx.Bucket(BKTHeaders)
-		testHash := testSh1.header.BlockHash()
+		testHash := testSh1.Header.BlockHash()
 		b := hdrs.Get(testHash.CloneBytes())
 		if b == nil {
 			t.Error("Header doesn't exist in db")
 		}
-		ser, err := serializeHeader(testSh1)
+		ser, err := SerializeHeader(testSh1)
 		if err != nil {
 			return err
 		}
@@ -136,7 +137,7 @@ func TestHeaderDB_Put(t *testing.T) {
 		if b == nil {
 			t.Error("Best tip doesn't exist in db")
 		}
-		ser, err = serializeHeader(testSh1)
+		ser, err = SerializeHeader(testSh1)
 		if err != nil {
 			return err
 		}
@@ -156,12 +157,12 @@ func TestHeaderDB_Put(t *testing.T) {
 	}
 	err = headers.db.View(func(btx *bolt.Tx) error {
 		hdrs := btx.Bucket(BKTHeaders)
-		testHash := testSh2.header.BlockHash()
+		testHash := testSh2.Header.BlockHash()
 		b := hdrs.Get(testHash.CloneBytes())
 		if b == nil {
 			t.Error("Header doesn't exist in db")
 		}
-		ser, err := serializeHeader(testSh2)
+		ser, err := SerializeHeader(testSh2)
 		if err != nil {
 			return err
 		}
@@ -176,7 +177,7 @@ func TestHeaderDB_Put(t *testing.T) {
 		if b == nil {
 			t.Error("Best tip doesn't exist in db")
 		}
-		ser, err = serializeHeader(testSh1)
+		ser, err = SerializeHeader(testSh1)
 		if err != nil {
 			return err
 		}
@@ -205,12 +206,12 @@ func TestHeaderDB_GetPreviousHeader(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	hdr, err := headers.GetPreviousHeader(testSh2.header)
+	hdr, err := headers.GetPreviousHeader(testSh2.Header)
 	if err != nil {
 		t.Error(err)
 	}
-	shHash := testSh1.header.BlockHash()
-	testHdrHash := hdr.header.BlockHash()
+	shHash := testSh1.Header.BlockHash()
+	testHdrHash := hdr.Header.BlockHash()
 	if !testHdrHash.IsEqual(&shHash) {
 		t.Error("Get previous header returned incorrect header")
 	}
@@ -243,11 +244,11 @@ func TestHeaderDB_GetBestHeader(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	testSer, err := serializeHeader(testSh1)
+	testSer, err := SerializeHeader(testSh1)
 	if err != nil {
 		t.Error(err)
 	}
-	ser, err := serializeHeader(hdr)
+	ser, err := SerializeHeader(hdr)
 	if err != nil {
 		t.Error(err)
 	}
@@ -261,6 +262,7 @@ func TestHeaderDB_Height(t *testing.T) {
 	headers, err := NewHeaderDB("")
 	if err != nil {
 		t.Error(err)
+		return
 	}
 	err = headers.Put(testSh1, true)
 	if err != nil {
@@ -270,7 +272,7 @@ func TestHeaderDB_Height(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	if height != testSh1.height {
+	if height != testSh1.Height {
 		t.Error("Returned incorrect height")
 	}
 	os.RemoveAll("headers.bin")
@@ -285,26 +287,26 @@ func TestHeaderDB_Prune(t *testing.T) {
 	var toStay []chainhash.Hash
 	for i := 0; i < 2500; i++ {
 		hdr := testSh1
-		hdr.height = uint32(i)
+		hdr.Height = uint32(i)
 		prev := make([]byte, 32)
 		rand.Read(prev)
 		prevHash, err := chainhash.NewHash(prev)
 		if err != nil {
 			t.Error(err)
 		}
-		hdr.header.PrevBlock = *prevHash
+		hdr.Header.PrevBlock = *prevHash
 		err = headers.Put(hdr, true)
 		if err != nil {
 			t.Error(err)
 		}
 		if i < 500 {
-			toDelete = append(toDelete, hdr.header.BlockHash())
+			toDelete = append(toDelete, hdr.Header.BlockHash())
 		} else {
-			toStay = append(toStay, hdr.header.BlockHash())
+			toStay = append(toStay, hdr.Header.BlockHash())
 		}
 	}
 
-	err = headers.Prune()
+	err = headers.prune()
 	if err != nil {
 		t.Error(err)
 	}

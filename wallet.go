@@ -123,7 +123,11 @@ func NewSPVWallet(config *Config) (*SPVWallet, error) {
 		return nil, err
 	}
 
-	w.blockchain, err = NewBlockchain(w.repoPath, w.creationDate, w.params)
+	hdb, err := NewHeaderDB(w.repoPath)
+	if err != nil {
+		return nil, err
+	}
+	w.blockchain, err = NewBlockchain(hdb, w.creationDate, w.params)
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +149,7 @@ func NewSPVWallet(config *Config) (*SPVWallet, error) {
 		if err != nil {
 			return nil, 0, err
 		}
-		hash := storedHeader.header.BlockHash()
+		hash := storedHeader.Header.BlockHash()
 		return &hash, int32(height), nil
 	}
 
@@ -364,7 +368,7 @@ func (w *SPVWallet) ChainTip() (uint32, chainhash.Hash) {
 	if err != nil {
 		return 0, ch
 	}
-	return sh.height, sh.header.BlockHash()
+	return sh.Height, sh.Header.BlockHash()
 }
 
 func (w *SPVWallet) AddWatchedScript(script []byte) error {
@@ -394,7 +398,11 @@ func (w *SPVWallet) Close() {
 func (w *SPVWallet) ReSyncBlockchain(fromDate time.Time) {
 	w.Close()
 	os.Remove(path.Join(w.repoPath, "headers.bin"))
-	blockchain, err := NewBlockchain(w.repoPath, fromDate, w.params)
+	hdb, err := NewHeaderDB(w.repoPath)
+	if err != nil {
+		return
+	}
+	blockchain, err := NewBlockchain(hdb, fromDate, w.params)
 	if err != nil {
 		return
 	}

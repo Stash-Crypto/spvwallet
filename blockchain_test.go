@@ -44,8 +44,8 @@ func createBlockChain(bc *Blockchain) error {
 	if err != nil {
 		return err
 	}
-	x := best.height
-	last := best.header
+	x := best.Height
+	last := best.Header
 	for i := 0; i < 2015; i++ {
 		x++
 		hdr := wire.BlockHeader{}
@@ -59,12 +59,12 @@ func createBlockChain(bc *Blockchain) error {
 			return err
 		}
 		hdr.MerkleRoot = *ch
-		hdr.Bits = best.header.Bits
+		hdr.Bits = best.Header.Bits
 		hdr.Version = 3
 		sh := StoredHeader{
-			header:    hdr,
-			height:    x,
-			totalWork: big.NewInt(0),
+			Header:    hdr,
+			Height:    x,
+			TotalWork: big.NewInt(0),
 		}
 		bc.db.Put(sh, true)
 		last = hdr
@@ -75,7 +75,11 @@ func createBlockChain(bc *Blockchain) error {
 var MockCreationTime time.Time
 
 func TestNewBlockchain(t *testing.T) {
-	bc, err := NewBlockchain("", MockCreationTime, &chaincfg.MainNetParams)
+	hdr, err := NewHeaderDB("")
+	if err != nil {
+		t.Error(err)
+	}
+	bc, err := NewBlockchain(hdr, MockCreationTime, &chaincfg.MainNetParams)
 	if err != nil {
 		t.Error(err)
 	}
@@ -83,19 +87,23 @@ func TestNewBlockchain(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	bestHash := best.header.BlockHash()
+	bestHash := best.Header.BlockHash()
 	checkHash := mainnetCheckpoints[0].Header.BlockHash()
 	if !bestHash.IsEqual(&checkHash) {
 		t.Error("Blockchain failed to initialize with correct mainnet checkpoint")
 	}
-	if best.height != mainnetCheckpoints[0].Height {
+	if best.Height != mainnetCheckpoints[0].Height {
 		t.Error("Blockchain failed to initialized with correct mainnet checkpoint height")
 	}
-	if best.totalWork.Uint64() != 0 {
+	if best.TotalWork.Uint64() != 0 {
 		t.Error("Blockchain failed to initialized with correct mainnet total work")
 	}
 	os.RemoveAll("headers.bin")
-	bc, err = NewBlockchain("", MockCreationTime, &chaincfg.TestNet3Params)
+	hdr, err = NewHeaderDB("")
+	if err != nil {
+		t.Error(err)
+	}
+	bc, err = NewBlockchain(hdr, MockCreationTime, &chaincfg.TestNet3Params)
 	if err != nil {
 		t.Error(err)
 	}
@@ -103,19 +111,23 @@ func TestNewBlockchain(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	bestHash = best.header.BlockHash()
+	bestHash = best.Header.BlockHash()
 	checkHash = testnet3Checkpoints[0].Header.BlockHash()
 	if !bestHash.IsEqual(&checkHash) {
 		t.Error("Blockchain failed to initialize with correct testnet checkpoint")
 	}
-	if best.height != testnet3Checkpoints[0].Height {
+	if best.Height != testnet3Checkpoints[0].Height {
 		t.Error("Blockchain failed to initialized with correct testnet checkpoint height")
 	}
-	if best.totalWork.Uint64() != 0 {
+	if best.TotalWork.Uint64() != 0 {
 		t.Error("Blockchain failed to initialized with correct testnet total work")
 	}
 	os.RemoveAll("headers.bin")
-	bc, err = NewBlockchain("", MockCreationTime, &chaincfg.RegressionNetParams)
+	hdr, err = NewHeaderDB("")
+	if err != nil {
+		t.Error(err)
+	}
+	bc, err = NewBlockchain(hdr, MockCreationTime, &chaincfg.RegressionNetParams)
 	if err != nil {
 		t.Error(err)
 	}
@@ -123,22 +135,26 @@ func TestNewBlockchain(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	bestHash = best.header.BlockHash()
+	bestHash = best.Header.BlockHash()
 	checkHash = regtestCheckpoint.Header.BlockHash()
 	if !bestHash.IsEqual(&checkHash) {
 		t.Error("Blockchain failed to initialize with correct regtest checkpoint")
 	}
-	if best.height != regtestCheckpoint.Height {
+	if best.Height != regtestCheckpoint.Height {
 		t.Error("Blockchain failed to initialized with correct regtest checkpoint height")
 	}
-	if best.totalWork.Uint64() != 0 {
+	if best.TotalWork.Uint64() != 0 {
 		t.Error("Blockchain failed to initialized with correct regtest total work")
 	}
 	os.RemoveAll("headers.bin")
 }
 
 func TestBlockchain_CommitHeader(t *testing.T) {
-	bc, err := NewBlockchain("", MockCreationTime, &chaincfg.RegressionNetParams)
+	hdr, err := NewHeaderDB("")
+	if err != nil {
+		t.Error(err)
+	}
+	bc, err := NewBlockchain(hdr, MockCreationTime, &chaincfg.RegressionNetParams)
 	if err != nil {
 		t.Error(err)
 	}
@@ -171,17 +187,21 @@ func TestBlockchain_CommitHeader(t *testing.T) {
 	}
 	for i := len(headers) - 1; i >= 0; i-- {
 		putHash := headers[i].BlockHash()
-		retHash := best.header.BlockHash()
+		retHash := best.Header.BlockHash()
 		if !putHash.IsEqual(&retHash) {
 			t.Error("Header put failed")
 		}
-		best, err = bc.db.GetPreviousHeader(best.header)
+		best, err = bc.db.GetPreviousHeader(best.Header)
 	}
 	os.RemoveAll("headers.bin")
 }
 
 func Test_Reorg(t *testing.T) {
-	bc, err := NewBlockchain("", MockCreationTime, &chaincfg.RegressionNetParams)
+	hdr, err := NewHeaderDB("")
+	if err != nil {
+		t.Error(err)
+	}
+	bc, err := NewBlockchain(hdr, MockCreationTime, &chaincfg.RegressionNetParams)
 	if err != nil {
 		t.Error(err)
 	}
@@ -244,17 +264,21 @@ func Test_Reorg(t *testing.T) {
 	}
 	for i := len(headers) - 1; i >= 0; i-- {
 		putHash := headers[i].BlockHash()
-		retHash := best.header.BlockHash()
+		retHash := best.Header.BlockHash()
 		if !putHash.IsEqual(&retHash) {
 			t.Error("Header put failed")
 		}
-		best, err = bc.db.GetPreviousHeader(best.header)
+		best, err = bc.db.GetPreviousHeader(best.Header)
 	}
 	os.RemoveAll("headers.bin")
 }
 
 func TestBlockchain_GetCommonAncestor(t *testing.T) {
-	bc, err := NewBlockchain("", MockCreationTime, &chaincfg.RegressionNetParams)
+	hdrs, err := NewHeaderDB("")
+	if err != nil {
+		t.Error(err)
+	}
+	bc, err := NewBlockchain(hdrs, MockCreationTime, &chaincfg.RegressionNetParams)
 	if err != nil {
 		t.Error(err)
 	}
@@ -267,7 +291,7 @@ func TestBlockchain_GetCommonAncestor(t *testing.T) {
 		hdr.Deserialize(bytes.NewReader(b))
 		bc.CommitHeader(hdr)
 	}
-	prevBest := StoredHeader{header: hdr, height: 10}
+	prevBest := StoredHeader{Header: hdr, Height: 10}
 	for i := 0; i < len(fork)-1; i++ {
 		b, err := hex.DecodeString(fork[i])
 		if err != nil {
@@ -276,13 +300,13 @@ func TestBlockchain_GetCommonAncestor(t *testing.T) {
 		hdr.Deserialize(bytes.NewReader(b))
 		bc.CommitHeader(hdr)
 	}
-	currentBest := StoredHeader{header: hdr, height: 11}
+	currentBest := StoredHeader{Header: hdr, Height: 11}
 
 	last, err := bc.GetCommonAncestor(currentBest, prevBest)
 	if err != nil {
 		t.Error(err)
 	}
-	if last.height != 5 {
+	if last.Height != 5 {
 		t.Error("Incorrect reorg height")
 	}
 	os.RemoveAll("headers.bin")
@@ -290,7 +314,11 @@ func TestBlockchain_GetCommonAncestor(t *testing.T) {
 
 func TestBlockchain_CheckHeader(t *testing.T) {
 	params := &chaincfg.RegressionNetParams
-	bc, err := NewBlockchain("", MockCreationTime, params)
+	hdr, err := NewHeaderDB("")
+	if err != nil {
+		t.Error(err)
+	}
+	bc, err := NewBlockchain(hdr, MockCreationTime, params)
 	if err != nil {
 		t.Error(err)
 	}
@@ -313,9 +341,9 @@ func TestBlockchain_CheckHeader(t *testing.T) {
 	hdr1 := wire.BlockHeader{}
 	hdr1.Deserialize(&buf)
 	sh := StoredHeader{
-		header:    hdr0,
-		height:    0,
-		totalWork: big.NewInt(0),
+		Header:    hdr0,
+		Height:    0,
+		TotalWork: big.NewInt(0),
 	}
 	if !bc.CheckHeader(hdr1, sh) {
 		t.Error("Check header incorrectly returned false")
@@ -352,7 +380,11 @@ func TestBlockchain_CheckHeader(t *testing.T) {
 }
 
 func TestBlockchain_GetNPrevBlockHashes(t *testing.T) {
-	bc, err := NewBlockchain("", MockCreationTime, &chaincfg.RegressionNetParams)
+	hdrs, err := NewHeaderDB("")
+	if err != nil {
+		t.Error(err)
+	}
+	bc, err := NewBlockchain(hdrs, MockCreationTime, &chaincfg.RegressionNetParams)
 	if err != nil {
 		t.Error(err)
 	}
@@ -433,7 +465,11 @@ func TestBlockchain_checkProofOfWork(t *testing.T) {
 }
 
 func TestBlockchain_SetChainState(t *testing.T) {
-	bc, err := NewBlockchain("", MockCreationTime, &chaincfg.RegressionNetParams)
+	hdr, err := NewHeaderDB("")
+	if err != nil {
+		t.Error(err)
+	}
+	bc, err := NewBlockchain(hdr, MockCreationTime, &chaincfg.RegressionNetParams)
 	if err != nil {
 		t.Error(err)
 	}
@@ -488,7 +524,11 @@ func TestBlockchain_calcDiffAdjust(t *testing.T) {
 }
 
 func TestBlockchain_GetBlockLocatorHashes(t *testing.T) {
-	bc, err := NewBlockchain("", MockCreationTime, &chaincfg.RegressionNetParams)
+	hdrs, err := NewHeaderDB("")
+	if err != nil {
+		t.Error(err)
+	}
+	bc, err := NewBlockchain(hdrs, MockCreationTime, &chaincfg.RegressionNetParams)
 	if err != nil {
 		t.Error(err)
 	}
@@ -531,7 +571,11 @@ func TestBlockchain_GetBlockLocatorHashes(t *testing.T) {
 }
 
 func TestBlockchain_GetEpoch(t *testing.T) {
-	bc, err := NewBlockchain("", MockCreationTime, &chaincfg.RegressionNetParams)
+	hdr, err := NewHeaderDB("")
+	if err != nil {
+		t.Error(err)
+	}
+	bc, err := NewBlockchain(hdr, MockCreationTime, &chaincfg.RegressionNetParams)
 	if err != nil {
 		t.Error(err)
 	}
@@ -551,7 +595,11 @@ func TestBlockchain_GetEpoch(t *testing.T) {
 
 func TestBlockchain_calcRequiredWork(t *testing.T) {
 	params := &chaincfg.TestNet3Params
-	bc, err := NewBlockchain("", MockCreationTime, params)
+	hdr, err := NewHeaderDB("")
+	if err != nil {
+		t.Error(err)
+	}
+	bc, err := NewBlockchain(hdr, MockCreationTime, params)
 	if err != nil {
 		t.Error(err)
 	}
@@ -566,19 +614,19 @@ func TestBlockchain_calcRequiredWork(t *testing.T) {
 
 	// Test during difficulty adjust period
 	newHdr := wire.BlockHeader{}
-	newHdr.PrevBlock = best.header.BlockHash()
+	newHdr.PrevBlock = best.Header.BlockHash()
 	work, err := bc.calcRequiredWork(newHdr, 2016, best)
 	if err != nil {
 		t.Error(err)
 	}
-	if work <= best.header.Bits {
+	if work <= best.Header.Bits {
 		t.Error("Returned in correct bits")
 	}
 	newHdr.Bits = work
 	sh := StoredHeader{
-		header:    newHdr,
-		height:    2016,
-		totalWork: blockchain.CompactToBig(work),
+		Header:    newHdr,
+		Height:    2016,
+		TotalWork: blockchain.CompactToBig(work),
 	}
 	bc.db.Put(sh, true)
 
@@ -595,9 +643,9 @@ func TestBlockchain_calcRequiredWork(t *testing.T) {
 	}
 	newHdr1.Bits = work1
 	sh = StoredHeader{
-		header:    newHdr1,
-		height:    2017,
-		totalWork: blockchain.CompactToBig(work1),
+		Header:    newHdr1,
+		Height:    2017,
+		TotalWork: blockchain.CompactToBig(work1),
 	}
 	bc.db.Put(sh, true)
 
@@ -614,9 +662,9 @@ func TestBlockchain_calcRequiredWork(t *testing.T) {
 	}
 	newHdr2.Bits = work2
 	sh = StoredHeader{
-		header:    newHdr2,
-		height:    2018,
-		totalWork: blockchain.CompactToBig(work2),
+		Header:    newHdr2,
+		Height:    2018,
+		TotalWork: blockchain.CompactToBig(work2),
 	}
 	bc.db.Put(sh, true)
 
@@ -633,9 +681,9 @@ func TestBlockchain_calcRequiredWork(t *testing.T) {
 	}
 	newHdr3.Bits = work3
 	sh = StoredHeader{
-		header:    newHdr3,
-		height:    2019,
-		totalWork: blockchain.CompactToBig(work3),
+		Header:    newHdr3,
+		Height:    2019,
+		TotalWork: blockchain.CompactToBig(work3),
 	}
 	bc.db.Put(sh, true)
 

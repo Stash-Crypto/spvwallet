@@ -40,11 +40,7 @@ type Blockchain struct {
 	state  ChainState
 }
 
-func NewBlockchain(filePath string, walletCreationDate time.Time, params *chaincfg.Params) (*Blockchain, error) {
-	hdb, err := NewHeaderDB(filePath)
-	if err != nil {
-		return nil, err
-	}
+func NewBlockchain(hdb Headers, walletCreationDate time.Time, params *chaincfg.Params) (*Blockchain, error) {
 	b := &Blockchain{
 		lock:   new(sync.Mutex),
 		params: params,
@@ -57,9 +53,9 @@ func NewBlockchain(filePath string, walletCreationDate time.Time, params *chainc
 		checkpoint := GetCheckpoint(walletCreationDate, params)
 		// Put the checkpoint to the db
 		sh := StoredHeader{
-			header:    checkpoint.Header,
-			height:    checkpoint.Height,
-			totalWork: big.NewInt(0),
+			Header:    checkpoint.Header,
+			Height:    checkpoint.Height,
+			TotalWork: big.NewInt(0),
 		}
 		err := b.db.Put(sh, true)
 		if err != nil {
@@ -79,7 +75,7 @@ func (b *Blockchain) CommitHeader(header wire.BlockHeader) (bool, *StoredHeader,
 	if err != nil {
 		return false, nil, 0, err
 	}
-	tipHash := bestHeader.header.BlockHash()
+	tipHash := bestHeader.Header.BlockHash()
 	var parentHeader StoredHeader
 
 	// If the tip is also the parent of this header, then we can save a database read by skipping
@@ -102,29 +98,29 @@ func (b *Blockchain) CommitHeader(header wire.BlockHeader) (bool, *StoredHeader,
 		return newTip, nil, 0, nil
 	}
 	// Add the work of this header to the total work stored at the previous header
-	cumulativeWork := new(big.Int).Add(parentHeader.totalWork, blockchain.CalcWork(header.Bits))
+	cumulativeWork := new(big.Int).Add(parentHeader.TotalWork, blockchain.CalcWork(header.Bits))
 
 	// If the cumulative work is greater than the total work of our best header
 	// then we have a new best header. Update the chain tip and check for a reorg.
-	if cumulativeWork.Cmp(bestHeader.totalWork) == 1 {
+	if cumulativeWork.Cmp(bestHeader.TotalWork) == 1 {
 		newTip = true
-		prevHash := parentHeader.header.BlockHash()
+		prevHash := parentHeader.Header.BlockHash()
 		// If this header is not extending the previous best header then we have a reorg.
 		if !tipHash.IsEqual(&prevHash) {
-			commonAncestor, err = b.GetCommonAncestor(StoredHeader{header: header, height: parentHeader.height + 1}, bestHeader)
+			commonAncestor, err = b.GetCommonAncestor(StoredHeader{Header: header, Height: parentHeader.Height + 1}, bestHeader)
 			if err != nil {
 				log.Errorf("Error calculating common ancestor: %s", err.Error())
 				return newTip, commonAncestor, 0, err
 			}
-			log.Warningf("REORG!!! REORG!!! REORG!!! At block %d, Wiped out %d blocks", int(bestHeader.height), int(bestHeader.height-commonAncestor.height))
+			log.Warningf("REORG!!! REORG!!! REORG!!! At block %d, Wiped out %d blocks", int(bestHeader.Height), int(bestHeader.Height-commonAncestor.Height))
 		}
 	}
-	newHeight := parentHeader.height + 1
+	newHeight := parentHeader.Height + 1
 	// Put the header to the database
 	err = b.db.Put(StoredHeader{
-		header:    header,
-		height:    newHeight,
-		totalWork: cumulativeWork,
+		Header:    header,
+		Height:    newHeight,
+		TotalWork: cumulativeWork,
 	}, newTip)
 	if err != nil {
 		return newTip, commonAncestor, 0, err
@@ -134,8 +130,8 @@ func (b *Blockchain) CommitHeader(header wire.BlockHeader) (bool, *StoredHeader,
 
 func (b *Blockchain) CheckHeader(header wire.BlockHeader, prevHeader StoredHeader) bool {
 	// Get hash of n-1 header
-	prevHash := prevHeader.header.BlockHash()
-	height := prevHeader.height
+	prevHash := prevHeader.Header.BlockHash()
+	height := prevHeader.Height
 
 	// Check if headers link together.  That whole 'blockchain' thing.
 	if prevHash.IsEqual(&header.PrevBlock) == false {
@@ -174,14 +170,14 @@ func (b *Blockchain) calcRequiredWork(header wire.BlockHeader, height int32, pre
 		// If we are on testnet
 		if b.params.ReduceMinDifficulty {
 			// If it's been more than 20 minutes since the last header return the minimum difficulty
-			if header.Timestamp.After(prevHeader.header.Timestamp.Add(targetSpacing * 2)) {
+			if header.Timestamp.After(prevHeader.Header.Timestamp.Add(targetSpacing * 2)) {
 				return b.params.PowLimitBits, nil
 			} else { // Otherwise return the difficulty of the last block not using special difficulty rules
 				for {
 					var err error = nil
-					for err == nil && int32(prevHeader.height)%epochLength != 0 && prevHeader.header.Bits == b.params.PowLimitBits {
+					for err == nil && int32(prevHeader.Height)%epochLength != 0 && prevHeader.Header.Bits == b.params.PowLimitBits {
 						var sh StoredHeader
-						sh, err = b.db.GetPreviousHeader(prevHeader.header)
+						sh, err = b.db.GetPreviousHeader(prevHeader.Header)
 						// Error should only be non-nil if prevHeader is the checkpoint.
 						// In that case we should just return checkpoint bits
 						if err == nil {
@@ -189,12 +185,12 @@ func (b *Blockchain) calcRequiredWork(header wire.BlockHeader, height int32, pre
 						}
 
 					}
-					return prevHeader.header.Bits, nil
+					return prevHeader.Header.Bits, nil
 				}
 			}
 		}
 		// Just return the bits from the last header
-		return prevHeader.header.Bits, nil
+		return prevHeader.Header.Bits, nil
 	}
 	// We are on a difficulty adjustment period so we need to correctly calculate the new difficulty.
 	epoch, err := b.GetEpoch()
@@ -202,19 +198,19 @@ func (b *Blockchain) calcRequiredWork(header wire.BlockHeader, height int32, pre
 		log.Error(err)
 		return 0, err
 	}
-	return calcDiffAdjust(*epoch, prevHeader.header, b.params), nil
+	return calcDiffAdjust(*epoch, prevHeader.Header, b.params), nil
 }
 
 func (b *Blockchain) CalcMedianTimePast(header wire.BlockHeader) (time.Time, error) {
 	timestamps := make([]int64, medianTimeBlocks)
 	numNodes := 0
-	iterNode := StoredHeader{header: header}
+	iterNode := StoredHeader{Header: header}
 	var err error
 
 	for i := 0; i < medianTimeBlocks; i++ {
 		numNodes++
-		timestamps[i] = iterNode.header.Timestamp.Unix()
-		iterNode, err = b.db.GetPreviousHeader(iterNode.header)
+		timestamps[i] = iterNode.Header.Timestamp.Unix()
+		iterNode, err = b.db.GetPreviousHeader(iterNode.Header)
 		if err != nil {
 			return time.Time{}, err
 		}
@@ -228,16 +224,16 @@ func (b *Blockchain) CalcMedianTimePast(header wire.BlockHeader) (time.Time, err
 func (b *Blockchain) GetEpoch() (*wire.BlockHeader, error) {
 	sh, err := b.db.GetBestHeader()
 	if err != nil {
-		return &sh.header, err
+		return &sh.Header, err
 	}
 	for i := 0; i < 2015; i++ {
-		sh, err = b.db.GetPreviousHeader(sh.header)
+		sh, err = b.db.GetPreviousHeader(sh.Header)
 		if err != nil {
-			return &sh.header, err
+			return &sh.Header, err
 		}
 	}
-	log.Debug("Epoch", sh.header.BlockHash().String())
-	return &sh.header, nil
+	log.Debug("Epoch", sh.Header.BlockHash().String())
+	return &sh.Header, nil
 }
 
 func (b *Blockchain) GetNPrevBlockHashes(n int) []*chainhash.Hash {
@@ -246,14 +242,14 @@ func (b *Blockchain) GetNPrevBlockHashes(n int) []*chainhash.Hash {
 	if err != nil {
 		return ret
 	}
-	tipSha := hdr.header.BlockHash()
+	tipSha := hdr.Header.BlockHash()
 	ret = append(ret, &tipSha)
 	for i := 0; i < n-1; i++ {
-		hdr, err = b.db.GetPreviousHeader(hdr.header)
+		hdr, err = b.db.GetPreviousHeader(hdr.Header)
 		if err != nil {
 			return ret
 		}
-		shaHash := hdr.header.BlockHash()
+		shaHash := hdr.Header.BlockHash()
 		ret = append(ret, &shaHash)
 	}
 	return ret
@@ -268,7 +264,7 @@ func (b *Blockchain) GetBlockLocatorHashes() []*chainhash.Hash {
 
 	rollback := func(parent StoredHeader, n int) (StoredHeader, error) {
 		for i := 0; i < n; i++ {
-			parent, err = b.db.GetPreviousHeader(parent.header)
+			parent, err = b.db.GetPreviousHeader(parent.Header)
 			if err != nil {
 				return parent, err
 			}
@@ -283,7 +279,7 @@ func (b *Blockchain) GetBlockLocatorHashes() []*chainhash.Hash {
 			step *= 2
 			start = 0
 		}
-		hash := parent.header.BlockHash()
+		hash := parent.Header.BlockHash()
 		ret = append(ret, &hash)
 		if len(ret) == 500 {
 			break
@@ -302,7 +298,7 @@ func (b *Blockchain) GetCommonAncestor(bestHeader, prevBestHeader StoredHeader) 
 	var err error
 	rollback := func(parent StoredHeader, n int) (StoredHeader, error) {
 		for i := 0; i < n; i++ {
-			parent, err = b.db.GetPreviousHeader(parent.header)
+			parent, err = b.db.GetPreviousHeader(parent.Header)
 			if err != nil {
 				return parent, err
 			}
@@ -312,29 +308,29 @@ func (b *Blockchain) GetCommonAncestor(bestHeader, prevBestHeader StoredHeader) 
 
 	majority := bestHeader
 	minority := prevBestHeader
-	if bestHeader.height > prevBestHeader.height {
-		majority, err = rollback(majority, int(bestHeader.height-prevBestHeader.height))
+	if bestHeader.Height > prevBestHeader.Height {
+		majority, err = rollback(majority, int(bestHeader.Height-prevBestHeader.Height))
 		if err != nil {
 			return nil, err
 		}
-	} else if prevBestHeader.height > bestHeader.height {
-		minority, err = rollback(minority, int(prevBestHeader.height-bestHeader.height))
+	} else if prevBestHeader.Height > bestHeader.Height {
+		minority, err = rollback(minority, int(prevBestHeader.Height-bestHeader.Height))
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	for {
-		majorityHash := majority.header.BlockHash()
-		minorityHash := minority.header.BlockHash()
+		majorityHash := majority.Header.BlockHash()
+		minorityHash := minority.Header.BlockHash()
 		if majorityHash.IsEqual(&minorityHash) {
 			return &majority, nil
 		}
-		majority, err = b.db.GetPreviousHeader(majority.header)
+		majority, err = b.db.GetPreviousHeader(majority.Header)
 		if err != nil {
 			return nil, err
 		}
-		minority, err = b.db.GetPreviousHeader(minority.header)
+		minority, err = b.db.GetPreviousHeader(minority.Header)
 		if err != nil {
 			return nil, err
 		}

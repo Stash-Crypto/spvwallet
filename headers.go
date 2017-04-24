@@ -30,9 +30,6 @@ type Headers interface {
 	// If this is the new best header, the chain tip should also be updated
 	Put(header StoredHeader, newBestHeader bool) error
 
-	// Delete all headers after the MAX_HEADERS most recent
-	Prune() error
-
 	// Returns all information about the previous header
 	GetPreviousHeader(header wire.BlockHeader) (StoredHeader, error)
 
@@ -46,16 +43,15 @@ type Headers interface {
 	Height() (uint32, error)
 
 	// Cleanly close the db
-	Close()
+	Close() error
 
-	// Print all headers
-	Print(io.Writer)
+	Print(writer io.Writer)
 }
 
 type StoredHeader struct {
-	header    wire.BlockHeader
-	height    uint32
-	totalWork *big.Int
+	Header    wire.BlockHeader
+	Height    uint32
+	TotalWork *big.Int
 }
 
 // HeaderDB implements Headers using bolt DB
@@ -112,11 +108,11 @@ func (h *HeaderDB) Put(sh StoredHeader, newBestHeader bool) error {
 	}
 	return h.db.Update(func(btx *bolt.Tx) error {
 		hdrs := btx.Bucket(BKTHeaders)
-		ser, err := serializeHeader(sh)
+		ser, err := SerializeHeader(sh)
 		if err != nil {
 			return err
 		}
-		hash := sh.header.BlockHash()
+		hash := sh.Header.BlockHash()
 		err = hdrs.Put(hash.CloneBytes(), ser)
 		if err != nil {
 			return err
@@ -132,7 +128,7 @@ func (h *HeaderDB) Put(sh StoredHeader, newBestHeader bool) error {
 	})
 }
 
-func (h *HeaderDB) Prune() error {
+func (h *HeaderDB) prune() error {
 	h.lock.Lock()
 	defer h.lock.Unlock()
 	return h.db.Update(func(btx *bolt.Tx) error {
@@ -143,20 +139,20 @@ func (h *HeaderDB) Prune() error {
 		if b == nil {
 			return errors.New("ChainTip not set")
 		}
-		sh, err := deserializeHeader(b)
+		sh, err := DeserializeHeader(b)
 		if err != nil {
 			return err
 		}
-		height := sh.height
+		height := sh.Height
 		if numHeaders > MAX_HEADERS {
 			var toDelete [][]byte
 			pruneHeight := height - 2000
 			err := hdrs.ForEach(func(k, v []byte) error {
-				sh, err := deserializeHeader(v)
+				sh, err := DeserializeHeader(v)
 				if err != nil {
 					return err
 				}
-				if sh.height <= pruneHeight {
+				if sh.Height <= pruneHeight {
 					toDelete = append(toDelete, k)
 				}
 				return nil
@@ -194,7 +190,7 @@ func (h *HeaderDB) GetHeader(hash chainhash.Hash) (sh StoredHeader, err error) {
 		if b == nil {
 			return errors.New("Header does not exist in database")
 		}
-		sh, err = deserializeHeader(b)
+		sh, err = DeserializeHeader(b)
 		if err != nil {
 			return err
 		}
@@ -219,7 +215,7 @@ func (h *HeaderDB) GetBestHeader() (sh StoredHeader, err error) {
 		if b == nil {
 			return errors.New("ChainTip not set")
 		}
-		sh, err = deserializeHeader(b)
+		sh, err = DeserializeHeader(b)
 		if err != nil {
 			return err
 		}
@@ -235,16 +231,16 @@ func (h *HeaderDB) Height() (uint32, error) {
 	h.lock.Lock()
 	defer h.lock.Unlock()
 	if h.bestCache != nil {
-		return h.bestCache.height, nil
+		return h.bestCache.Height, nil
 	}
 	var height uint32
 	err := h.db.View(func(btx *bolt.Tx) error {
 		tip := btx.Bucket(BKTChainTip)
-		sh, err := deserializeHeader(tip.Get(KEYChainTip))
+		sh, err := DeserializeHeader(tip.Get(KEYChainTip))
 		if err != nil {
 			return err
 		}
-		height = sh.height
+		height = sh.Height
 		return nil
 	})
 	if err != nil {
@@ -261,8 +257,8 @@ func (h *HeaderDB) Print(w io.Writer) {
 		// Assume bucket exists and has keys
 		bkt := tx.Bucket(BKTHeaders)
 		bkt.ForEach(func(k, v []byte) error {
-			sh, _ := deserializeHeader(v)
-			h := float64(sh.height)
+			sh, _ := DeserializeHeader(v)
+			h := float64(sh.Height)
 			_, ok := m[h]
 			if ok {
 				for {
@@ -273,7 +269,7 @@ func (h *HeaderDB) Print(w io.Writer) {
 					}
 				}
 			}
-			m[h] = []string{sh.header.BlockHash().String(), sh.header.PrevBlock.String()}
+			m[h] = []string{sh.Header.BlockHash().String(), sh.Header.PrevBlock.String()}
 			return nil
 		})
 
@@ -297,7 +293,7 @@ func (h *HeaderDB) initializeCache() {
 	h.bestCache = &best
 	headers := []StoredHeader{best}
 	for i := 0; i < 99; i++ {
-		sh, err := h.GetPreviousHeader(best.header)
+		sh, err := h.GetPreviousHeader(best.Header)
 		if err != nil {
 			break
 		}
@@ -308,9 +304,10 @@ func (h *HeaderDB) initializeCache() {
 	}
 }
 
-func (h *HeaderDB) Close() {
+func (h *HeaderDB) Close() error {
 	h.lock.Lock()
 	h.db.Close()
+	return nil
 }
 
 /*----- header serialization ------- */
@@ -319,24 +316,24 @@ func (h *HeaderDB) Close() {
     4	       height             80
    32	       total work         84
 */
-func serializeHeader(sh StoredHeader) ([]byte, error) {
+func SerializeHeader(sh StoredHeader) ([]byte, error) {
 	var buf bytes.Buffer
-	err := sh.header.Serialize(&buf)
+	err := sh.Header.Serialize(&buf)
 	if err != nil {
 		return nil, err
 	}
-	err = binary.Write(&buf, binary.BigEndian, sh.height)
+	err = binary.Write(&buf, binary.BigEndian, sh.Height)
 	if err != nil {
 		return nil, err
 	}
-	biBytes := sh.totalWork.Bytes()
+	biBytes := sh.TotalWork.Bytes()
 	pad := make([]byte, 32-len(biBytes))
 	serializedBI := append(pad, biBytes...)
 	buf.Write(serializedBI)
 	return buf.Bytes(), nil
 }
 
-func deserializeHeader(b []byte) (sh StoredHeader, err error) {
+func DeserializeHeader(b []byte) (sh StoredHeader, err error) {
 	r := bytes.NewReader(b)
 	hdr := new(wire.BlockHeader)
 	err = hdr.Deserialize(r)
@@ -356,9 +353,9 @@ func deserializeHeader(b []byte) (sh StoredHeader, err error) {
 	bi := new(big.Int)
 	bi.SetBytes(biBytes)
 	sh = StoredHeader{
-		header:    *hdr,
-		height:    height,
-		totalWork: bi,
+		Header:    *hdr,
+		Height:    height,
+		TotalWork: bi,
 	}
 	return sh, nil
 }
@@ -383,7 +380,7 @@ func (h *HeaderCache) Set(sh StoredHeader) {
 	if h.headers.Len() > h.cacheSize {
 		h.pop()
 	}
-	hash := sh.header.BlockHash()
+	hash := sh.Header.BlockHash()
 	h.headers.Set(hash.String(), sh)
 }
 

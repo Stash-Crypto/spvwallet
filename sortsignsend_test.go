@@ -19,7 +19,8 @@ func MockWallet() *SPVWallet {
 		GetFilter:        txstore.GimmeFilter,
 	}
 
-	bc, _ := NewBlockchain("", MockCreationTime, &chaincfg.TestNet3Params)
+	hdr, _ := NewHeaderDB("")
+	bc, _ := NewBlockchain(hdr, MockCreationTime, &chaincfg.TestNet3Params)
 	createBlockChain(bc)
 
 	peerManager, _ := NewPeerManager(peerCfg)

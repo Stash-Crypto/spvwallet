@@ -65,7 +65,7 @@ func (w *SPVWallet) onMerkleBlock(p *peer.Peer, m *wire.MsgMerkleBlock) {
 	// If this is the sync peer, there are potentially
 	if w.blockchain.ChainState() == SYNCING && w.peerManager.DownloadPeer() != nil && w.peerManager.DownloadPeer().ID() == p.ID() {
 		best, _ := w.blockchain.db.GetBestHeader()
-		hash := best.header.BlockHash()
+		hash := best.Header.BlockHash()
 
 		// We may need to process multiple cached block headers.
 		err = w.requests.process(&hash, m, func(m *wire.MsgMerkleBlock) error {
@@ -120,7 +120,7 @@ func (w *SPVWallet) processBlock(p *peer.Peer, m *wire.MsgMerkleBlock) error {
 
 	// We hit a reorg. Rollback the transactions and resync from the reorg point.
 	if reorg != nil {
-		err := w.txstore.processReorg(reorg.height)
+		err := w.txstore.processReorg(reorg.Height)
 		if err != nil {
 			log.Error(err)
 		}
