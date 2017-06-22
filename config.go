@@ -56,6 +56,10 @@ type Config struct {
 
 	// A logger. You can write the logs to file or stdout or however else you want.
 	Logger logging.Backend
+
+	// The maximum number of new matches a filter is allowed to have before
+	// we send an update.
+	MaxFilterNewMatches uint32
 }
 
 func NewDefaultConfig() *Config {

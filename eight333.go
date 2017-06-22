@@ -9,6 +9,8 @@ import (
 	"github.com/btcsuite/btcd/wire"
 )
 
+const DefaultMaxFilterNewMatches = 7
+
 var (
 	maxHash              *chainhash.Hash
 	MAX_UNCONFIRMED_TIME time.Duration = time.Hour * 24 * 7
@@ -243,7 +245,8 @@ func (w *SPVWallet) onGetData(p *peer.Peer, m *wire.MsgGetData) {
 	log.Debugf("Sent %d of %d requested items to Peer%d", sent, len(m.InvList), p.ID())
 }
 
-func (w *SPVWallet) fPositiveHandler(quit chan int) {
+func (w *SPVWallet) fPositiveHandler(quit chan int, maxFilterNewMatches uint32) {
+
 exit:
 	for {
 		select {
@@ -252,7 +255,7 @@ exit:
 			falsePostives, _ := w.fpAccumulator[peer.ID()]
 			w.mutex.RUnlock()
 			falsePostives++
-			if falsePostives > 7 {
+			if falsePostives > maxFilterNewMatches {
 				w.updateFilterAndSend(peer)
 				log.Debugf("Reset %d false positives for Peer%d\n", falsePostives, peer.ID())
 				// reset accumulator

@@ -40,7 +40,7 @@ type SPVWallet struct {
 
 	fPositives    chan *peer.Peer
 	stopChan      chan int
-	fpAccumulator map[int32]int32
+	fpAccumulator map[int32]uint32
 	mutex         *sync.RWMutex
 
 	creationDate time.Time
@@ -50,6 +50,11 @@ type SPVWallet struct {
 	config *PeerManagerConfig
 
 	requests blockRequests
+
+	// maxFilterNewMatches is the maximum number of matches that
+	// to a filter which we have received before we recreate and load
+	// a new filter.
+	maxFilterNewMatches uint32
 }
 
 var log = logging.MustGetLogger("bitcoin")
@@ -82,6 +87,11 @@ func NewSPVWallet(config *Config) (*SPVWallet, error) {
 	if err != nil {
 		return nil, err
 	}
+	maxFilterNewMatches := config.MaxFilterNewMatches
+	if maxFilterNewMatches == 0 {
+		maxFilterNewMatches = DefaultMaxFilterNewMatches
+	}
+
 	w := &SPVWallet{
 		repoPath:         config.RepoPath,
 		masterPrivateKey: mPrivKey,
@@ -97,10 +107,11 @@ func NewSPVWallet(config *Config) (*SPVWallet, error) {
 			config.FeeAPI.String(),
 			config.Proxy,
 		),
-		fPositives:    make(chan *peer.Peer),
-		stopChan:      make(chan int),
-		fpAccumulator: make(map[int32]int32),
-		mutex:         new(sync.RWMutex),
+		fPositives:          make(chan *peer.Peer),
+		stopChan:            make(chan int),
+		fpAccumulator:       make(map[int32]uint32),
+		mutex:               new(sync.RWMutex),
+		maxFilterNewMatches: maxFilterNewMatches,
 	}
 
 	w.requests.reset()
@@ -165,7 +176,7 @@ func NewSPVWallet(config *Config) (*SPVWallet, error) {
 func (w *SPVWallet) Start() {
 	w.running = true
 	go w.peerManager.Start()
-	w.fPositiveHandler(w.stopChan)
+	w.fPositiveHandler(w.stopChan, w.maxFilterNewMatches)
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
