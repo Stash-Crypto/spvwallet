@@ -258,6 +258,7 @@ func (mgr *SPVManager) processBlock(p *peer.Peer, m *wire.MsgMerkleBlock) error 
 	return nil
 }
 
+// TODO
 func (mgr *SPVManager) OnTx(p *peer.Peer, m *wire.MsgTx) {
 	mgr.mutex.Lock()
 	height, err := mgr.PeerManager.DequeueTx(p, m.TxHash())
@@ -277,7 +278,7 @@ func (mgr *SPVManager) OnTx(p *peer.Peer, m *wire.MsgTx) {
 		mgr.fPositives <- p
 		return
 	}
-	updateFilterAndSend(p, mgr.TxStore)
+	updateFilter(mgr.PeerManager, mgr.TxStore)
 	log.Infof("Tx %s from Peer%d ingested at height %d", m.TxHash().String(), p.ID(), height)
 }
 
@@ -351,7 +352,7 @@ exit:
 			mgr.mutex.RUnlock()
 			falsePostives++
 			if falsePostives > maxFilterNewMatches {
-				updateFilterAndSend(peer, mgr.TxStore)
+				rebroadcastFilter(peer, mgr.TxStore)
 				log.Debugf("Reset %d false positives for Peer%d\n", falsePostives, peer.ID())
 				// reset accumulator
 				falsePostives = 0
@@ -363,17 +364,6 @@ exit:
 			break exit
 		}
 	}
-}
-
-func updateFilterAndSend(p *peer.Peer, tx TxStore) {
-	filt, err := tx.GimmeFilter()
-	if err != nil {
-		log.Errorf("Error creating filter: %s\n", err.Error())
-		return
-	}
-	// send filter
-	p.QueueMessage(filt.MsgFilterLoad(), nil)
-	log.Debugf("Sent filter to Peer%d\n", p.ID())
 }
 
 func (mgr *SPVManager) Rebroadcast() {
@@ -388,4 +378,26 @@ func (mgr *SPVManager) Rebroadcast() {
 	for _, peer := range mgr.PeerManager.ReadyPeers() {
 		peer.QueueMessage(invMsg, nil)
 	}
+}
+
+// Generate a new filter and give it to the PeerManager. It will be
+// sent around to all connected peers too.
+func updateFilter(pm *PeerManager, tx TxStore) error {
+	f, err := tx.GimmeFilter()
+	if err != nil {
+		return err
+	}
+
+	return pm.FilterLoad(f.MsgFilterLoad())
+}
+
+func rebroadcastFilter(p *peer.Peer, tx TxStore) {
+	filt, err := tx.GimmeFilter()
+	if err != nil {
+		log.Errorf("Error creating filter: %s\n", err.Error())
+		return
+	}
+	// send filter
+	p.QueueMessage(filt.MsgFilterLoad(), nil)
+	log.Debugf("Sent filter to Peer%d\n", p.ID())
 }

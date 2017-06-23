@@ -142,6 +142,10 @@ func NewSPVWallet(config *Config) (*SPVWallet, error) {
 		return nil, err
 	}
 
+	if err = updateFilter(w.mgr.PeerManager, w.txStore); err != nil {
+		return nil, err
+	}
+
 	return w, nil
 }
 
@@ -340,12 +344,12 @@ func (w *SPVWallet) ChainTip() (uint32, chainhash.Hash) {
 
 func (w *SPVWallet) AddWatchedScript(script []byte) error {
 	err := w.txStore.WatchedScripts().Put(script)
+	if err != nil {
+		return err
+	}
 	w.txStore.populateAdrs()
 
-	for _, peer := range w.mgr.PeerManager.ReadyPeers() {
-		updateFilterAndSend(peer, w.txStore)
-	}
-	return err
+	return updateFilter(w.mgr.PeerManager, w.txStore)
 }
 
 func (w *SPVWallet) DumpHeaders(writer io.Writer) {

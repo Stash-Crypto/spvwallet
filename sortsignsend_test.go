@@ -17,7 +17,7 @@ func MockWallet() (*SPVWallet, *txStore) {
 	peerCfg := &PeerManagerConfig{
 		UserAgentVersion: WALLET_VERSION,
 		Params:           &chaincfg.TestNet3Params,
-		GetFilter:        txStore.GimmeFilter,
+		//GetFilter:        txStore.GimmeFilter,
 	}
 
 	hdr, _ := NewHeaderDB("")
@@ -25,6 +25,8 @@ func MockWallet() (*SPVWallet, *txStore) {
 	createBlockChain(bc)
 
 	peerManager, _ := NewPeerManager(peerCfg)
+	f, _ := txStore.GimmeFilter()
+	peerManager.FilterLoad(f.MsgFilterLoad())
 	return &SPVWallet{
 		params:     &chaincfg.TestNet3Params,
 		keyManager: txStore.keyManager,

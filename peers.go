@@ -13,7 +13,6 @@ import (
 	"github.com/btcsuite/btcd/connmgr"
 	"github.com/btcsuite/btcd/peer"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil/bloom"
 	"golang.org/x/net/proxy"
 )
 
@@ -56,9 +55,6 @@ type PeerManagerConfig struct {
 	// If this field is not nil the PeerManager will only connect to this address
 	TrustedPeer net.Addr
 
-	// Function to get bloom filter to give to peers
-	GetFilter func() (*bloom.Filter, error)
-
 	// Function to beging chain download
 	StartChainDownload func(*peer.Peer)
 
@@ -83,11 +79,13 @@ type PeerManager struct {
 	readyPeers map[*peer.Peer]struct{}
 	peerMutex  *sync.RWMutex
 
+	running bool
+	filter  *wire.MsgFilterLoad
+
 	trustedPeer    net.Addr
 	downloadPeer   *peer.Peer
 	downloadQueues map[int32]map[chainhash.Hash]int32
 
-	getFilter          func() (*bloom.Filter, error)
 	startChainDownload func(*peer.Peer)
 
 	targetOutbound uint32
@@ -110,7 +108,6 @@ func NewPeerManager(config *PeerManagerConfig) (*PeerManager, error) {
 		downloadQueues:     make(map[int32]map[chainhash.Hash]int32),
 		sourceAddr:         wire.NewNetAddressIPPort(net.ParseIP("0.0.0.0"), defaultPort, 0),
 		trustedPeer:        config.TrustedPeer,
-		getFilter:          config.GetFilter,
 		startChainDownload: config.StartChainDownload,
 		proxy:              config.Proxy,
 	}
@@ -237,14 +234,11 @@ func (pm *PeerManager) onVerack(p *peer.Peer, msg *wire.MsgVerAck) {
 	// Tell the addr manager this is a good address
 	pm.addrManager.Good(p.NA())
 
-	filter, err := pm.getFilter()
-	if err != nil {
-		log.Error(err)
-		return
-	}
-	p.QueueMessage(filter.MsgFilterLoad(), nil)
-
 	pm.peerMutex.Lock()
+	if pm.filter != nil {
+		p.QueueMessage(pm.filter, nil)
+	}
+
 	pm.readyPeers[p] = struct{}{}
 	if pm.downloadPeer == nil {
 		pm.setDownloadPeer(p)
@@ -417,6 +411,7 @@ func (pm *PeerManager) Start() {
 		log.Info("Querying DNS seeds")
 		pm.queryDNSSeeds()
 	}
+	pm.running = true
 	pm.connManager.Start()
 	go func() {
 		tick := time.NewTicker(time.Minute)
@@ -433,6 +428,7 @@ func (pm *PeerManager) Start() {
 func (pm *PeerManager) Stop() {
 	pm.peerMutex.Lock()
 	defer pm.peerMutex.Unlock()
+	pm.running = false
 	wg := new(sync.WaitGroup)
 	for _, peer := range pm.openPeers {
 		wg.Add(1)
@@ -445,4 +441,35 @@ func (pm *PeerManager) Stop() {
 	}
 	pm.openPeers = make(map[uint64]*peer.Peer)
 	wg.Wait()
+}
+
+// Clears all filters from all peers.
+func (pm *PeerManager) FilterClear() {
+	pm.peerMutex.Lock()
+	defer pm.peerMutex.Unlock()
+
+	pm.filter = nil
+
+	if pm.running {
+		clearMsg := &wire.MsgFilterClear{}
+		for _, peer := range pm.ReadyPeers() {
+			peer.QueueMessage(clearMsg, nil)
+		}
+	}
+}
+
+// Sends filters to all peers.
+func (pm *PeerManager) FilterLoad(loadMsg *wire.MsgFilterLoad) error {
+	pm.peerMutex.Lock()
+	defer pm.peerMutex.Unlock()
+
+	pm.filter = loadMsg
+
+	if pm.running {
+		for peer := range pm.readyPeers {
+			peer.QueueMessage(loadMsg, nil)
+		}
+	}
+
+	return nil
 }

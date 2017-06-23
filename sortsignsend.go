@@ -41,9 +41,9 @@ func (mgr *SPVManager) Broadcast(tx *wire.MsgTx) error {
 	log.Debugf("Broadcasting tx %s to peers", tx.TxHash().String())
 	for _, peer := range mgr.PeerManager.ReadyPeers() {
 		peer.QueueMessage(invMsg, nil)
-		updateFilterAndSend(peer, mgr.TxStore)
 	}
-	return nil
+
+	return updateFilter(mgr.PeerManager, mgr.TxStore)
 }
 
 type Coin struct {
