@@ -331,6 +331,14 @@ func (mgr *SPVManager) OnGetData(p *peer.Peer, m *wire.MsgGetData) {
 				log.Errorf("Error getting tx %s: %s", thing.Hash.String(), err.Error())
 				continue
 			}
+
+			// This peer asked for something we don't have, so what's
+			// going on with that? We should disconnect the peer.
+			if tx == nil {
+				p.Disconnect()
+				return
+			}
+
 			p.QueueMessageWithEncoding(tx, nil, wire.WitnessEncoding)
 			sent++
 			continue
