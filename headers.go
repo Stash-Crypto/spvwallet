@@ -11,11 +11,12 @@ import (
 	"sort"
 	"sync"
 
+	"strings"
+
 	"github.com/boltdb/bolt"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/cevaris/ordered_map"
-	"strings"
 )
 
 const (
@@ -31,7 +32,7 @@ type Headers interface {
 	Put(header StoredHeader, newBestHeader bool) error
 
 	// Returns all information about the previous header
-	GetPreviousHeader(header wire.BlockHeader) (StoredHeader, error)
+	GetPreviousHeader(header *wire.BlockHeader) (StoredHeader, error)
 
 	// Grab a header given hash
 	GetHeader(hash chainhash.Hash) (StoredHeader, error)
@@ -172,7 +173,7 @@ func (h *HeaderDB) prune() error {
 	})
 }
 
-func (h *HeaderDB) GetPreviousHeader(header wire.BlockHeader) (sh StoredHeader, err error) {
+func (h *HeaderDB) GetPreviousHeader(header *wire.BlockHeader) (sh StoredHeader, err error) {
 	hash := header.PrevBlock
 	return h.GetHeader(hash)
 }
@@ -293,7 +294,7 @@ func (h *HeaderDB) initializeCache() {
 	h.bestCache = &best
 	headers := []StoredHeader{best}
 	for i := 0; i < 99; i++ {
-		sh, err := h.GetPreviousHeader(best.Header)
+		sh, err := h.GetPreviousHeader(&best.Header)
 		if err != nil {
 			break
 		}

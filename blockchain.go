@@ -2,14 +2,15 @@ package spvwallet
 
 import (
 	"fmt"
-	"github.com/btcsuite/btcd/blockchain"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
 	"math/big"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/wire"
 )
 
 // Blockchain settings.  These are kindof Bitcoin specific, but not contained in
@@ -83,7 +84,7 @@ func (b *Blockchain) CommitHeader(header wire.BlockHeader) (bool, *StoredHeader,
 	if header.PrevBlock.IsEqual(&tipHash) {
 		parentHeader = bestHeader
 	} else {
-		parentHeader, err = b.db.GetPreviousHeader(header)
+		parentHeader, err = b.db.GetPreviousHeader(&header)
 		if err != nil {
 			return false, nil, 0, fmt.Errorf("Header %s does not extend any known headers", header.BlockHash().String())
 		}
@@ -177,7 +178,7 @@ func (b *Blockchain) calcRequiredWork(header wire.BlockHeader, height int32, pre
 					var err error = nil
 					for err == nil && int32(prevHeader.Height)%epochLength != 0 && prevHeader.Header.Bits == b.params.PowLimitBits {
 						var sh StoredHeader
-						sh, err = b.db.GetPreviousHeader(prevHeader.Header)
+						sh, err = b.db.GetPreviousHeader(&prevHeader.Header)
 						// Error should only be non-nil if prevHeader is the checkpoint.
 						// In that case we should just return checkpoint bits
 						if err == nil {
@@ -210,7 +211,7 @@ func (b *Blockchain) CalcMedianTimePast(header wire.BlockHeader) (time.Time, err
 	for i := 0; i < medianTimeBlocks; i++ {
 		numNodes++
 		timestamps[i] = iterNode.Header.Timestamp.Unix()
-		iterNode, err = b.db.GetPreviousHeader(iterNode.Header)
+		iterNode, err = b.db.GetPreviousHeader(&iterNode.Header)
 		if err != nil {
 			return time.Time{}, err
 		}
@@ -227,7 +228,7 @@ func (b *Blockchain) GetEpoch() (*wire.BlockHeader, error) {
 		return &sh.Header, err
 	}
 	for i := 0; i < 2015; i++ {
-		sh, err = b.db.GetPreviousHeader(sh.Header)
+		sh, err = b.db.GetPreviousHeader(&sh.Header)
 		if err != nil {
 			return &sh.Header, err
 		}
@@ -245,7 +246,7 @@ func (b *Blockchain) GetNPrevBlockHashes(n int) []*chainhash.Hash {
 	tipSha := hdr.Header.BlockHash()
 	ret = append(ret, &tipSha)
 	for i := 0; i < n-1; i++ {
-		hdr, err = b.db.GetPreviousHeader(hdr.Header)
+		hdr, err = b.db.GetPreviousHeader(&hdr.Header)
 		if err != nil {
 			return ret
 		}
@@ -264,7 +265,7 @@ func (b *Blockchain) GetBlockLocatorHashes() []*chainhash.Hash {
 
 	rollback := func(parent StoredHeader, n int) (StoredHeader, error) {
 		for i := 0; i < n; i++ {
-			parent, err = b.db.GetPreviousHeader(parent.Header)
+			parent, err = b.db.GetPreviousHeader(&parent.Header)
 			if err != nil {
 				return parent, err
 			}
@@ -298,7 +299,7 @@ func (b *Blockchain) GetCommonAncestor(bestHeader, prevBestHeader StoredHeader) 
 	var err error
 	rollback := func(parent StoredHeader, n int) (StoredHeader, error) {
 		for i := 0; i < n; i++ {
-			parent, err = b.db.GetPreviousHeader(parent.Header)
+			parent, err = b.db.GetPreviousHeader(&parent.Header)
 			if err != nil {
 				return parent, err
 			}
@@ -326,11 +327,11 @@ func (b *Blockchain) GetCommonAncestor(bestHeader, prevBestHeader StoredHeader) 
 		if majorityHash.IsEqual(&minorityHash) {
 			return &majority, nil
 		}
-		majority, err = b.db.GetPreviousHeader(majority.Header)
+		majority, err = b.db.GetPreviousHeader(&majority.Header)
 		if err != nil {
 			return nil, err
 		}
-		minority, err = b.db.GetPreviousHeader(minority.Header)
+		minority, err = b.db.GetPreviousHeader(&minority.Header)
 		if err != nil {
 			return nil, err
 		}
