@@ -1,10 +1,12 @@
 package spvwallet
 
 import (
+	"fmt"
+	"time"
+
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/peer"
 	"github.com/btcsuite/btcd/wire"
-	"time"
 )
 
 var (
@@ -36,7 +38,6 @@ func (w *SPVWallet) startChainDownload(p *peer.Peer) {
 				log.Info("Chain download complete")
 				w.blockchain.SetChainState(WAITING)
 				w.Rebroadcast()
-				close(w.blockQueue)
 			}
 			return
 		}
@@ -47,31 +48,72 @@ func (w *SPVWallet) startChainDownload(p *peer.Peer) {
 	}
 }
 
+func (w *SPVWallet) reset() {
+	w.requests.reset()
+
+	// Select a new download peer.
+	w.peerManager.selectNewDownloadPeer()
+}
+
 func (w *SPVWallet) onMerkleBlock(p *peer.Peer, m *wire.MsgMerkleBlock) {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
+
+	var err error
+	// If this is the sync peer, there are potentially
 	if w.blockchain.ChainState() == SYNCING && w.peerManager.DownloadPeer() != nil && w.peerManager.DownloadPeer().ID() == p.ID() {
-		queueHash := <-w.blockQueue
-		headerHash := m.Header.BlockHash()
-		if !headerHash.IsEqual(&queueHash) {
-			log.Errorf("Peer%d is sending us blocks out of order", p.ID())
-			p.Disconnect()
+		best, _ := w.blockchain.db.GetBestHeader()
+		hash := best.header.BlockHash()
+
+		// We may need to process multiple cached block headers.
+		err = w.requests.process(&hash, m, func(m *wire.MsgMerkleBlock) error {
+			return w.processBlock(p, m)
+		})
+
+		if err == nil {
+			// Continue syncing if the request cache is empty.
+			if w.requests.empty() {
+				go w.startChainDownload(p)
+			}
+
 			return
 		}
+
+		// If we received a block that we didn't request, find a new
+		// sync peer.
+		if err == ErrUnrequested {
+			w.reset()
+			return
+		}
+
+		// If there are headers with no known previous header, we continue
+		// syncing from the peer but we reset the request cache.
+		if err == ErrNoKnownPrevious {
+			w.requests.reset()
+			return
+		}
+	} else {
+		// If this is not from the sync peer, process the block normally.
+		err = w.processBlock(p, m)
 	}
+
+	if err != nil {
+		log.Error(err)
+	}
+}
+
+func (w *SPVWallet) processBlock(p *peer.Peer, m *wire.MsgMerkleBlock) error {
 	txids, err := checkMBlock(m)
 	if err != nil {
-		log.Errorf("Peer%d sent an invalid MerkleBlock", p.ID())
 		p.Disconnect()
-		return
+		return fmt.Errorf("Peer%d sent an invalid MerkleBlock", p.ID())
 	}
 	newBlock, reorg, height, err := w.blockchain.CommitHeader(m.Header)
 	if err != nil {
-		log.Warning(err)
-		return
+		return err
 	}
 	if !newBlock {
-		return
+		return nil
 	}
 
 	// We hit a reorg. Rollback the transactions and resync from the reorg point.
@@ -84,7 +126,7 @@ func (w *SPVWallet) onMerkleBlock(p *peer.Peer, m *wire.MsgMerkleBlock) {
 			w.blockchain.SetChainState(SYNCING)
 			w.blockchain.db.Put(*reorg, true)
 			go w.startChainDownload(p)
-			return
+			return nil
 		}
 	}
 
@@ -93,14 +135,10 @@ func (w *SPVWallet) onMerkleBlock(p *peer.Peer, m *wire.MsgMerkleBlock) {
 	}
 
 	log.Debugf("Received Merkle Block %s at height %d\n", m.Header.BlockHash().String(), height)
-	if len(w.blockQueue) == 0 && w.blockchain.ChainState() == SYNCING {
-		go w.startChainDownload(p)
-	}
 	if w.blockchain.ChainState() == WAITING {
 		txns, err := w.txstore.Txns().GetAll(false)
 		if err != nil {
-			log.Error(err)
-			return
+			return err
 		}
 		now := time.Now()
 		for i := len(txns) - 1; i >= 0; i-- {
@@ -119,6 +157,8 @@ func (w *SPVWallet) onMerkleBlock(p *peer.Peer, m *wire.MsgMerkleBlock) {
 			}
 		}
 	}
+
+	return nil
 }
 
 func (w *SPVWallet) onTx(p *peer.Peer, m *wire.MsgTx) {
@@ -146,10 +186,12 @@ func (w *SPVWallet) onTx(p *peer.Peer, m *wire.MsgTx) {
 func (w *SPVWallet) onInv(p *peer.Peer, m *wire.MsgInv) {
 	go func() {
 		defer func() {
+			w.mutex.Unlock()
 			if err := recover(); err != nil {
 				log.Error(err)
 			}
 		}()
+		w.mutex.Lock()
 		for _, inv := range m.InvList {
 			switch inv.Type {
 			case wire.InvTypeBlock:
@@ -161,7 +203,7 @@ func (w *SPVWallet) onInv(p *peer.Peer, m *wire.MsgInv) {
 				gData.AddInvVect(inv)
 				p.QueueMessage(gData, nil)
 				if w.blockchain.ChainState() == SYNCING && w.peerManager.DownloadPeer() != nil && w.peerManager.DownloadPeer().ID() == p.ID() {
-					w.blockQueue <- inv.Hash
+					w.requests.add(&inv.Hash)
 				}
 			case wire.InvTypeTx:
 				w.peerManager.QueueTxForDownload(p, inv.Hash, 0)
