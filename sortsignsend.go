@@ -548,7 +548,7 @@ func (w *SPVWallet) buildTx(amount int64, addr btc.Address, feeLevel wallet.FeeL
 	for k := range coinMap {
 		coins = append(coins, k)
 	}
-	inputSource := func(target btc.Amount) (total btc.Amount, inputs []*wire.TxIn, scripts [][]byte, err error) {
+	inputSource := func(target btc.Amount) (total btc.Amount, inputs []*wire.TxIn, scripts []*wire.TxOut, err error) {
 		coinSelector := coinset.MaxValueAgeCoinSelector{MaxInputs: 10000, MinChangeAmount: btc.Amount(10000)}
 		coins, err := coinSelector.CoinSelect(target, coins)
 		if err != nil {
